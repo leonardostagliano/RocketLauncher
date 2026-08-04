@@ -121,6 +121,9 @@ Velocmd automatically refreshes the index every 15 minutes in the background, an
 ### 🪟 Active Window Switching
 Type `/tabs` to instantly see and switch between all your open applications and browser tabs — no Alt+Tab fumbling required.
 
+### 📂 Open in Explorer
+As a feature, navigate to your file, and press `Cntl + Enter` to open the file directly into file-explorer, so that you can navigate your files easily
+
 ---
 
 ## Indexing Performance
