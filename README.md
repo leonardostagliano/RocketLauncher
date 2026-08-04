@@ -158,6 +158,7 @@ You can also manually pick any of these presets from the settings panel (press <
 ### Basic Controls
 * **<kbd>↓</kbd> / <kbd>↑</kbd>** : Navigate through search results.
 * **<kbd>Enter</kbd>** : Open the selected file, folder, or application.
+* **<kbd>Cntl+Enter</kbd>** : Open the selected file path in the file-explorer.
 * **<kbd>Esc</kbd>** : Clear the search bar. Pressing it a second time hides the launcher.
 * **<kbd>Tab</kbd>** : Toggle the Settings menu.
 
