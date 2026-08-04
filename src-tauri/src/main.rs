@@ -826,6 +826,43 @@ fn open_file(app: tauri::AppHandle, path: String) {
 }
 
 #[tauri::command]
+fn show_in_explorer(app: tauri::AppHandle, path: String) {
+    let p = std::path::Path::new(&path);
+
+    #[cfg(target_os = "windows")]
+    {
+        if p.exists() && !p.is_dir() {
+            let _ = std::process::Command::new("explorer.exe")
+                .args(["/select,", &path])
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn();
+        } else {
+            let target = if p.exists() {
+                path.clone()
+            } else if let Some(parent) = p.parent() {
+                parent.to_string_lossy().to_string()
+            } else {
+                path.clone()
+            };
+            let _ = std::process::Command::new("explorer.exe")
+                .arg(&target)
+                .spawn();
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Some(parent) = p.parent() {
+            let _ = tauri_plugin_opener::open_path(parent.to_string_lossy().as_ref(), None::<&str>);
+        }
+    }
+
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+}
+
+#[tauri::command]
 fn open_url_private(app: tauri::AppHandle, url: String) {
     let mut success = false;
 
@@ -1730,7 +1767,8 @@ fn main() {
             quit_app,
             close_active_window,
             open_url_private,
-            execute_nox_command
+            execute_nox_command,
+            show_in_explorer
         ])
         .setup(|app| {
             let mut has_binfile = false;

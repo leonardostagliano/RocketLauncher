@@ -28,7 +28,7 @@ const loaderHtml = `
   </div>`;
 searchWrapper.insertAdjacentHTML('beforeend', loaderHtml);
 const searchLoader = document.getElementById("search-loader");
-const CURRENT_VERSION = "0.1.7";
+const CURRENT_VERSION = "0.1.8";
 let isUpdateAvailable = false;
 let latestReleaseUrl = "https://github.com/YashvardhanG/Velocmd/releases/latest";
 
@@ -566,6 +566,8 @@ async function render() {
 
     const li = document.createElement("li");
     li.className = `result-item ${isSelected ? "selected" : ""}`;
+    li.dataset.path = path;
+    li.dataset.kind = kind;
 
     let iconHtml;
     if (iconData) {
@@ -914,6 +916,19 @@ async function openFile(path, kind, name) {
   } else {
     await invoke("open_file", { path });
   }
+  input.value = "";
+  state.activeFilters = [];
+  renderChips();
+
+  if (!state.showRecents) {
+    await invoke("reset_window");
+    lastWindowHeight = 65;
+  }
+  render();
+}
+
+async function showInExplorer(path) {
+  await invoke("show_in_explorer", { path });
   input.value = "";
   state.activeFilters = [];
   renderChips();
@@ -1290,6 +1305,19 @@ document.addEventListener('keydown', async (e) => {
     e.preventDefault();
     state.selectedIndex = (state.selectedIndex - 1 + items.length) % items.length;
     renderStyles();
+  } else if (e.key === "Enter" && e.ctrlKey) {
+    e.preventDefault();
+    const selectedEl = items[state.selectedIndex];
+    if (selectedEl && selectedEl.dataset.path) {
+      const filePath = selectedEl.dataset.path;
+      const kind = selectedEl.dataset.kind;
+
+      if (kind !== 'command' && kind !== 'filter' && kind !== 'website' && kind !== 'terminal_command'
+        && !filePath.startsWith('velo:') && !filePath.startsWith('cmd:') && !filePath.startsWith('nox:')
+        && !filePath.startsWith('http://') && !filePath.startsWith('https://') && !filePath.startsWith('hwnd:')) {
+        showInExplorer(filePath);
+      }
+    }
   } else if (e.key === "Enter") {
     e.preventDefault();
 
