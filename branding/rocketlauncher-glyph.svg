@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="24" height="24" fill="currentColor">
-  <title>RocketLauncher</title>
-  <g transform="rotate(45 512 512) translate(512 512) scale(1.24) translate(-512 -526)">
-    <path fill-rule="evenodd" d="M512 150C606 222 646 318 646 430V650C646 680 624 702 594 702H430C400 702 378 680 378 650V430C378 318 418 222 512 150ZM512 358A62 62 0 1 0 512 482A62 62 0 1 0 512 358Z"/>
-    <path d="M378 520L290 608C278 620 272 636 272 652V742L378 690Z"/>
-    <path d="M646 520L734 608C746 620 752 636 752 652V742L646 690Z"/>
-    <path class="flame" d="M512 752C556 800 566 846 512 902C458 846 468 800 512 752Z"/>
-  </g>
-</svg>

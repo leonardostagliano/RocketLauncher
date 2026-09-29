@@ -1,7 +1,9 @@
-// Rigenera le icone dell'app dai sorgenti SVG in branding/ (npm run icons).
-// - src-tauri/icons: icona dell'app (ico per exe, NSIS e MSI; png per la finestra) da rocketlauncher-icon.svg
+// Rigenera le icone dell'app dall'unico sorgente branding/rocketlauncher-icon.svg (npm run icons).
+// Il logo e' identico ovunque: nessuna variante semplificata per la tray o per l'interfaccia.
+// - src-tauri/icons: icona dell'app (ico per exe, NSIS e MSI; png per la finestra)
 // - src-tauri/icons/tray/32x32.png: icona dell'area di notifica (main.rs la include con include_bytes!)
 // - docs/images/logo.png: logo del README (256 px)
+// Il simbolo #rl-logo in src/index.html ripete lo stesso disegno: se il logo cambia, va aggiornato anche li'.
 // `tauri icon` genera anche le icone per Android, iOS, macOS e Microsoft Store: l'app e' solo per Windows e le
 // installa con NSIS e MSI, quindi quei file vengono rimossi.
 import { execFileSync } from 'node:child_process'
@@ -18,7 +20,7 @@ const tauri = (...args) =>
   })
 
 tauri('branding/rocketlauncher-icon.svg')
-tauri('branding/rocketlauncher-tray.svg', '--output', 'src-tauri/icons/tray', '--png', '32')
+tauri('branding/rocketlauncher-icon.svg', '--output', 'src-tauri/icons/tray', '--png', '32')
 
 for (const name of [
   'android',
