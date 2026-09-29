@@ -76,6 +76,102 @@ static SHOW_RECENTS: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(true));
 static REFOCUS_ON_BLUR: AtomicBool = AtomicBool::new(false);
 static IS_INDEXING: AtomicBool = AtomicBool::new(false);
 
+// Window size, shared with src/main.js (WINDOW_MIN_HEIGHT, WINDOW_MAX_HEIGHT) and src/styles.css (--bar-h):
+// collapsed, the window shows only the search bar.
+const WINDOW_WIDTH: f64 = 800.0;
+const COLLAPSED_HEIGHT: f64 = 56.0;
+const EXPANDED_HEIGHT: f64 = 400.0;
+
+/// Material behind the glass that src/styles.css draws over it. Mica (Windows 11) follows the Windows app theme by
+/// itself, because tao keeps the window's dark-mode attribute in sync; Acrylic (Windows 10 1809 and later) gets the
+/// tint of the current theme and is applied again when the theme changes. Without either, styles.css draws a denser
+/// glass. ROCKETLAUNCHER_MATERIAL=mica|acrylic|none overrides the choice, to compare the materials or to turn one off.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WindowMaterial {
+    Mica,
+    Acrylic,
+    Plain,
+}
+
+impl WindowMaterial {
+    fn as_str(self) -> &'static str {
+        match self {
+            WindowMaterial::Mica => "mica",
+            WindowMaterial::Acrylic => "acrylic",
+            WindowMaterial::Plain => "none",
+        }
+    }
+}
+
+/// Windows 11: Mica exists and DWM rounds the corners of this window (8 px, the radius styles.css uses there).
+const FIRST_WINDOWS_11_BUILD: u32 = 22000;
+/// Windows 10 1809: the first build where Acrylic works on a window.
+const FIRST_ACRYLIC_BUILD: u32 = 17763;
+
+// Acrylic tint on Windows 10 as RGBA (Windows 11 ignores it). tests/design-contrast.test.mjs reads these two lines.
+const ACRYLIC_TINT_DARK: (u8, u8, u8, u8) = (20, 20, 24, 153);
+const ACRYLIC_TINT_LIGHT: (u8, u8, u8, u8) = (243, 243, 245, 153);
+
+static WINDOW_MATERIAL: std::sync::OnceLock<WindowMaterial> = std::sync::OnceLock::new();
+
+fn windows_build() -> u32 {
+    #[cfg(windows)]
+    {
+        windows_version::OsVersion::current().build
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
+}
+
+fn material_for(build: u32, requested: Option<&str>) -> WindowMaterial {
+    match requested.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("mica") => WindowMaterial::Mica,
+        Some("acrylic") => WindowMaterial::Acrylic,
+        Some("none") => WindowMaterial::Plain,
+        _ if build >= FIRST_WINDOWS_11_BUILD => WindowMaterial::Mica,
+        _ if build >= FIRST_ACRYLIC_BUILD => WindowMaterial::Acrylic,
+        _ => WindowMaterial::Plain,
+    }
+}
+
+fn chosen_material() -> WindowMaterial {
+    *WINDOW_MATERIAL.get_or_init(|| {
+        material_for(windows_build(), std::env::var("ROCKETLAUNCHER_MATERIAL").ok().as_deref())
+    })
+}
+
+fn apply_window_material(window: &tauri::WebviewWindow) {
+    use tauri::window::{Color, Effect, EffectsBuilder};
+    let effects = match chosen_material() {
+        WindowMaterial::Mica => EffectsBuilder::new().effect(Effect::Mica).build(),
+        WindowMaterial::Acrylic => {
+            let dark = !matches!(window.theme(), Ok(tauri::Theme::Light));
+            let (r, g, b, a) = if dark { ACRYLIC_TINT_DARK } else { ACRYLIC_TINT_LIGHT };
+            EffectsBuilder::new().effect(Effect::Acrylic).color(Color(r, g, b, a)).build()
+        }
+        WindowMaterial::Plain => return,
+    };
+    let _ = window.set_effects(effects);
+}
+
+/// What styles.css needs to know about the window: the material, and who draws the corners. "dwm": Windows 11
+/// rounds the window itself; "square": Acrylic on Windows 10 fills the square window; "css": no material, the
+/// transparent corners are cut by the CSS radius.
+#[tauri::command]
+fn window_material() -> serde_json::Value {
+    let material = chosen_material();
+    let corners = if windows_build() >= FIRST_WINDOWS_11_BUILD {
+        "dwm"
+    } else if material == WindowMaterial::Plain {
+        "css"
+    } else {
+        "square"
+    };
+    serde_json::json!({ "material": material.as_str(), "corners": corners })
+}
+
 const PRESET_SHORTCUTS: &[&str] = &[
     "Super+Shift+.",
     "Alt+Space",
@@ -178,17 +274,10 @@ fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let show_recents = *SHOW_RECENTS.lock().unwrap();
 
-        if show_recents {
-            let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
-                width: 800.0,
-                height: 400.0,
-            }));
-        } else {
-            let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
-                width: 800.0,
-                height: 70.0,
-            }));
-        }
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
+            width: WINDOW_WIDTH,
+            height: if show_recents { EXPANDED_HEIGHT } else { COLLAPSED_HEIGHT },
+        }));
 
         let _ = window.center();
         let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
@@ -1197,8 +1286,8 @@ fn open_url_private(app: tauri::AppHandle, url: String) {
 #[tauri::command]
 fn reset_window(window: tauri::Window) {
     let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
-        width: 800.0,
-        height: 70.0,
+        width: WINDOW_WIDTH,
+        height: COLLAPSED_HEIGHT,
     }));
 
     let _ = window.center();
@@ -1211,7 +1300,7 @@ fn reset_window(window: tauri::Window) {
 #[tauri::command]
 fn resize_window(window: tauri::Window, height: f64) {
     let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
-        width: 800.0,
+        width: WINDOW_WIDTH,
         height,
     }));
 }
@@ -1889,7 +1978,7 @@ fn smoke_exit_code<R: tauri::Runtime>(context: &tauri::Context<R>, expected_vers
         return 10;
     }
     let assets = context.assets();
-    if ["index.html", "main.js", "update-source.js", "styles.css"]
+    if ["index.html", "main.js", "update-source.js", "icons.js", "styles.css"]
         .iter()
         .any(|name| assets.get(&tauri::utils::assets::AssetKey::from(*name)).is_none())
     {
@@ -1959,7 +2048,8 @@ fn main() {
             close_active_window,
             open_url_private,
             execute_nox_command,
-            show_in_explorer
+            show_in_explorer,
+            window_material
         ])
         .setup(|app| {
             let mut has_binfile = false;
@@ -1979,8 +2069,11 @@ fn main() {
             let window = app.get_webview_window("main").unwrap();
             let w_clone = window.clone();
 
-            window.on_window_event(move |event| {
-                if let tauri::WindowEvent::Focused(false) = event {
+            // The window is still hidden here: the material is in place before the first show.
+            apply_window_material(&window);
+
+            window.on_window_event(move |event| match event {
+                tauri::WindowEvent::Focused(false) => {
                     if REFOCUS_ON_BLUR.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
                         let _ = w_clone.set_focus();
                         let w_check = w_clone.clone();
@@ -1994,13 +2087,19 @@ fn main() {
                         let _ = w_clone.hide();
                     }
                 }
+                // Acrylic keeps the tint it was applied with: give it the one of the new theme.
+                tauri::WindowEvent::ThemeChanged(_) if chosen_material() == WindowMaterial::Acrylic => {
+                    apply_window_material(&w_clone);
+                }
+                _ => {}
             });
 
             let quit_i = MenuItem::with_id(app, "quit", "Esci", true, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "Mostra RocketLauncher", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
 
-            let icon_bytes = include_bytes!("../icons/icon_32x32.png");
+            // Tray icon: generated from branding/rocketlauncher-tray.svg by `npm run icons`.
+            let icon_bytes = include_bytes!("../icons/tray/32x32.png");
             let tray_icon = match image::load_from_memory(icon_bytes) {
                 Ok(dynamic_img) => {
                     let rgba_img = dynamic_img.into_rgba8();
@@ -2085,6 +2184,23 @@ mod tests {
 
     fn paths(results: &[SearchResult]) -> Vec<&str> {
         results.iter().map(|result| result.path.as_str()).collect()
+    }
+
+    #[test]
+    fn picks_the_window_material_from_the_windows_build() {
+        assert_eq!(material_for(26200, None), WindowMaterial::Mica);
+        assert_eq!(material_for(22000, None), WindowMaterial::Mica);
+        assert_eq!(material_for(19045, None), WindowMaterial::Acrylic);
+        assert_eq!(material_for(17763, None), WindowMaterial::Acrylic);
+        assert_eq!(material_for(17134, None), WindowMaterial::Plain);
+    }
+
+    #[test]
+    fn lets_rocketlauncher_material_override_the_choice() {
+        assert_eq!(material_for(26200, Some("none")), WindowMaterial::Plain);
+        assert_eq!(material_for(26200, Some("acrylic")), WindowMaterial::Acrylic);
+        assert_eq!(material_for(19045, Some(" Mica ")), WindowMaterial::Mica);
+        assert_eq!(material_for(26200, Some("vetro")), WindowMaterial::Mica, "unknown values keep the default");
     }
 
     #[test]

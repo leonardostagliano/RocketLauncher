@@ -1,4 +1,5 @@
-import { HELP_URL, LATEST_RELEASE_URL, findUpdate } from "./update-source.js";
+import { HELP_URL, LATEST_RELEASE_URL, REPOSITORY_URL, findUpdate } from "./update-source.js";
+import { iconElement, iconNameFor } from "./icons.js";
 const { invoke } = window.__TAURI__.core;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { listen } = window.__TAURI__.event;
@@ -87,6 +88,50 @@ const RESULT_DETAILS = {
   terminalCommand: "Prompt dei comandi"
 };
 
+// Pill on the right of a row: what kind of item it is.
+const KIND_LABELS = {
+  app: "App",
+  folder: "Cartella",
+  file: "File",
+  drive: "Unità",
+  command: "Comando",
+  website: "Sito web",
+  active_tab: "Finestra",
+  filter: "Filtro",
+  terminal_command: "Terminale",
+  web_search: "Ricerca web",
+  windowsSettings: "Impostazioni"
+};
+
+// What Enter does on the selected row (row hint and accent key in the action bar).
+const ACTION_LABELS = {
+  launch: "Avvia",
+  open: "Apri",
+  run: "Esegui",
+  show: "Mostra",
+  add: "Aggiungi",
+  search: "Cerca",
+  shutdown: "Spegni",
+  restart: "Riavvia",
+  cancel: "Annulla"
+};
+
+// Key hints in the action bar, by state.
+const KEY_HINT_TEXT = {
+  choose: "Scegli",
+  revealInExplorer: "Mostra in Esplora file",
+  settings: "Impostazioni",
+  clear: "Azzera",
+  hide: "Nascondi",
+  move: "Sposta",
+  activate: "Attiva",
+  backToSearch: "Torna alla ricerca",
+  confirm: "Conferma",
+  close: "Chiudi"
+};
+
+const RECENTS_TITLE = "Recenti";
+
 const NUMBER_FORMAT = new Intl.NumberFormat("it-IT", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 
 // Rows of the shutdown and restart confirmation.
@@ -149,11 +194,18 @@ const WEB_SEARCH_URLS = {
 // so "perche" and "perché" both count).
 const QUESTION_WORDS = new Set(["come", "cosa", "perche", "quando", "chi", "dove", "how", "what", "why", "when", "who"]);
 
-// File names, window titles of other apps and typed text are inserted as text, never as
-// HTML: a page title such as "<img onerror=…>" shown under /finestre must not run script.
-const HTML_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
+// File names, window titles of other apps and typed text are always set as text (textContent),
+// never parsed as HTML: a page title such as "<img onerror=…>" shown under /finestre must not run
+// script. The only markup inserted as HTML is the constant icon SVG from icons.js.
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = String(text);
+  return node;
+}
+
+function keyCap(label, primary = false) {
+  return el("kbd", primary ? "primary" : "", label);
 }
 
 // Lowercase and without accents, like fold_for_search in main.rs.
@@ -221,6 +273,87 @@ function resultDetail(item, path, kind) {
   }
 }
 
+function kindLabel(path, kind) {
+  if (kind === "command" && path.startsWith("ms-settings:")) return KIND_LABELS.windowsSettings;
+  if (kind === "app" && path.startsWith("cmd:explorer ")) return KIND_LABELS.folder;
+  return KIND_LABELS[kind] ?? KIND_LABELS.file;
+}
+
+// The verb for Enter on a row, from its kind and path (the same cases openFile() handles).
+function actionLabel(path, kind) {
+  if (path === SHUTDOWN_NOW_PATH) return ACTION_LABELS.shutdown;
+  if (path === RESTART_NOW_PATH) return ACTION_LABELS.restart;
+  if (path === CANCEL_POWER_PATH) return ACTION_LABELS.cancel;
+  switch (kind) {
+    case "app":
+      return path.startsWith("cmd:explorer ") ? ACTION_LABELS.open : ACTION_LABELS.launch;
+    case "command":
+      if (path === "rocket:settings" || path === "rocket:help") return ACTION_LABELS.open;
+      if (path === "nox:install" || path === "nox:help" || path === "nox:check_updates") return ACTION_LABELS.open;
+      if (path.startsWith("rocket:") || path.startsWith("nox:")) return ACTION_LABELS.run;
+      return ACTION_LABELS.open;
+    case "terminal_command":
+      return ACTION_LABELS.run;
+    case "active_tab":
+      return ACTION_LABELS.show;
+    case "filter":
+      return ACTION_LABELS.add;
+    default:
+      return ACTION_LABELS.open;
+  }
+}
+
+// Ctrl+Enter shows the item in File Explorer: files, folders, drives and apps only.
+function canRevealInExplorer(path, kind) {
+  return kind !== "command" && kind !== "filter" && kind !== "website" && kind !== "terminal_command"
+    && !path.startsWith("rocket:") && !path.startsWith("cmd:") && !path.startsWith("nox:")
+    && !path.startsWith("http://") && !path.startsWith("https://") && !path.startsWith("hwnd:");
+}
+
+// Icon of a row: the system icon extracted by main.rs when there is one, otherwise a Lucide glyph.
+function rowIcon(iconName, iconData) {
+  if (typeof iconData === "string" && iconData.startsWith("data:image/")) {
+    const img = el("img", "app-icon");
+    img.alt = "";
+    img.src = iconData;
+    return img;
+  }
+  const tile = el("span", "result-icon");
+  tile.appendChild(iconElement(iconName));
+  return tile;
+}
+
+// A selectable row: li.result-item with icon, name, second line, Enter hint and kind pill.
+function resultRow({ name, detail, iconName, iconData, action, kind, badge, selected, revealable = false }) {
+  const li = el("li", `result-item${selected ? " selected" : ""}`);
+  li.setAttribute("role", "option");
+  li.setAttribute("aria-selected", String(selected));
+  li.dataset.action = action;
+  if (revealable) li.dataset.reveal = "";
+
+  const content = el("div", "result-content");
+  content.append(el("span", "result-name", name), el("span", "result-path", detail));
+
+  const hint = el("span", "result-hint");
+  hint.append(keyCap("↵"), action);
+  const meta = el("span", "result-meta");
+  meta.append(hint, el("span", "result-kind", badge ?? kindLabel("", kind)));
+
+  li.append(rowIcon(iconName, iconData), content, meta);
+  return li;
+}
+
+// A row that informs but cannot be opened (empty recents, index being built).
+function infoRow(iconName, title, subtitle, spinning = false) {
+  const row = el("div", "empty-recents-message");
+  const tile = el("span", "result-icon");
+  tile.appendChild(iconElement(iconName, spinning ? "icon spin" : "icon"));
+  const content = el("div", "result-content");
+  content.append(el("span", "result-name", title), el("span", "result-path", subtitle));
+  row.append(tile, content);
+  return row;
+}
+
 const input = document.getElementById("search-input");
 const container = document.getElementById("container");
 const resultsContainer = document.getElementById("results-container");
@@ -238,7 +371,28 @@ const analyticsToggle = document.getElementById("analytics-toggle");
 const updateBtn = document.getElementById("update-btn");
 const memoryDisplay = document.getElementById("memory-usage");
 const helpBtn = document.getElementById("help-btn");
+const keyHints = document.getElementById("key-hints");
+const licenseLink = document.getElementById("license-link");
 const searchWrapper = document.querySelector(".search-wrapper");
+
+// Window material chosen by main.rs (Mica, Acrylic or none) and who rounds the corners: styles.css
+// picks the density of the glass and the corner radius that matches the window.
+invoke("window_material")
+  .then(({ material, corners }) => {
+    document.documentElement.dataset.material = material;
+    document.documentElement.dataset.corners = corners;
+  })
+  .catch((err) => console.error("Window material unavailable:", err));
+
+// Links in the legal notice open in the default browser; the licence link is built from the
+// repository constant in update-source.js.
+if (licenseLink) licenseLink.href = `${REPOSITORY_URL}/blob/main/LICENSE`;
+document.querySelectorAll("a[data-external]").forEach((link) => {
+  link.addEventListener("click", (e) => {
+    e.preventDefault();
+    invoke("open_file", { path: link.href });
+  });
+});
 const loaderHtml = `
   <div id="search-loader" class="loader-dots hidden">
     <div class="loader-dot"></div>
@@ -400,18 +554,60 @@ async function updateMemoryUsage() {
 
 setInterval(updateMemoryUsage, 2000);
 
+// Every control of the settings panel, in reading order (left card, then right card). The arrow keys
+// move between them by position on screen (moveSettingsFocus), so the order only decides where the
+// first press lands.
 function getSettingsFocusables() {
   const base = [
+    shortcutDisplay,
     recentsToggle.parentElement,
     startupToggle.parentElement,
+    analyticsToggle.parentElement,
+    updateBtn,
     clearRecentsBtn,
     resetPosBtn,
-    shortcutDisplay,
-    updateBtn,
-    helpBtn,
-    analyticsToggle.parentElement
+    helpBtn
   ];
-  return base.filter(el => el !== null);
+  return base.filter(node => node !== null);
+}
+
+// Arrow keys move the settings cursor to the nearest control in that direction. The first press
+// selects the top-left control (Down/Right) or the bottom-right one (Up/Left); no wrap-around.
+function moveSettingsFocus(dx, dy) {
+  const items = getSettingsFocusables();
+  if (items.length === 0) return;
+  if (settingsIndex < 0 || settingsIndex >= items.length) {
+    settingsIndex = (dx < 0 || dy < 0) ? items.length - 1 : 0;
+    renderSettingsFocus();
+    return;
+  }
+  const from = items[settingsIndex].getBoundingClientRect();
+  let best = -1;
+  let bestScore = Infinity;
+  items.forEach((node, i) => {
+    if (i === settingsIndex) return;
+    const r = node.getBoundingClientRect();
+    // Distance in the direction of the arrow, between the facing edges: controls behind or level with the
+    // current one are skipped. Toggle rows span a whole card, so centres alone would mislead.
+    const along = dx > 0 ? r.left - from.right
+      : dx < 0 ? from.left - r.right
+        : dy > 0 ? r.top - from.bottom
+          : from.top - r.bottom;
+    if (along < -4) return;
+    // Offset across the arrow: zero when the two controls overlap on that axis.
+    const [a1, a2, b1, b2] = dx !== 0 ? [from.top, from.bottom, r.top, r.bottom] : [from.left, from.right, r.left, r.right];
+    const gap = Math.max(0, b1 - a2, a1 - b2);
+    const centreOffset = Math.abs((b1 + b2) / 2 - (a1 + a2) / 2);
+    const score = along + gap * 20 + centreOffset / 8;
+    if (score < bestScore) {
+      bestScore = score;
+      best = i;
+    }
+  });
+  if (best >= 0) {
+    settingsIndex = best;
+    renderSettingsFocus();
+  }
 }
 
 function renderSettingsFocus() {
@@ -439,6 +635,9 @@ function renderDropdownFocus() {
 
 invoke("set_recents_state", { show: state.showRecents });
 
+// Window heights, the same as COLLAPSED_HEIGHT and EXPANDED_HEIGHT in main.rs and --bar-h in styles.css:
+// collapsed shows only the search bar.
+const WINDOW_MIN_HEIGHT = 56;
 const WINDOW_MAX_HEIGHT = 400;
 
 async function toggleSettings() {
@@ -482,7 +681,7 @@ async function toggleSettings() {
         state.results = [];
         resultsContainer.classList.add("hidden");
         await invoke("reset_window");
-        lastWindowHeight = 65;
+        lastWindowHeight = WINDOW_MIN_HEIGHT;
       }
     }
   }
@@ -521,11 +720,11 @@ clearRecentsBtn.onclick = () => {
   localStorage.setItem("recentFiles", JSON.stringify([]));
 
   clearRecentsBtn.textContent = CLEAR_RECENTS_LABELS.done;
-  clearRecentsBtn.style.backgroundColor = "#4caf50";
+  clearRecentsBtn.classList.add("btn-success");
   setTimeout(() => {
     clearRecentsBtn.textContent = CLEAR_RECENTS_LABELS.idle;
-    clearRecentsBtn.style.backgroundColor = "";
-  }, 1000);
+    clearRecentsBtn.classList.remove("btn-success");
+  }, 1500);
 
   render();
 };
@@ -627,51 +826,9 @@ if (updateBtn) {
   };
 }
 
-function getFileIcon(path, kind) {
-  const tpath = path.toLowerCase().replace(/\//g, '\\');
-  const isUserProfile = /^c:\\users\\[^\\]+\\[^\\]+$/.test(tpath) || /^c:\\users\\[^\\]+$/.test(tpath) || /^c:\\documents and settings\\[^\\]+\\[^\\]+$/.test(tpath);
-
-  if (isUserProfile) {
-    if (tpath.endsWith("\\downloads")) return "📥";
-    if (tpath.endsWith("\\pictures") || tpath.endsWith("\\gallery")) return "🏞️";
-    if (tpath.endsWith("\\documents")) return "📝";
-    if (tpath.endsWith("\\music")) return "🎵";
-    if (tpath.endsWith("\\videos")) return "🎬";
-    if (tpath.endsWith("\\desktop")) return "🖥️";
-  }
-
-  if (tpath.includes("recyclebinfolder")) return "🗑️";
-
-  if (path === SHUTDOWN_NOW_PATH || path === RESTART_NOW_PATH) return "✅";
-  if (path === CANCEL_POWER_PATH) return "❌";
-
-  if (kind === "app") return "🚀";
-  if (kind === "folder") return "📁";
-  if (kind === "drive") return "💽";
-  if (kind === "command") return "⚙️";
-  if (kind === "website") return "🌐";
-  if (kind === "filter") return "🔍";
-  if (kind === "terminal_command") return "💻";
-
-  const ext = path.split('.').pop().toLowerCase();
-
-  if (['rs', 'go', 'py', 'js', 'ts', 'html', 'css', 'cpp', 'c'].includes(ext)) return "💻";
-  if (['json', 'yaml', 'xml', 'toml'].includes(ext)) return "⚙️";
-  if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'ico'].includes(ext)) return "🖼️";
-  if (['mp4', 'mkv', 'mov', 'avi'].includes(ext)) return "🎥";
-  if (['mp3', 'wav', 'ogg', 'flac'].includes(ext)) return "🎵";
-  if (['pdf'].includes(ext)) return "📕";
-  if (['doc', 'docx'].includes(ext)) return "📘";
-  if (['xls', 'xlsx', 'csv'].includes(ext)) return "📊";
-  if (['txt', 'md'].includes(ext)) return "📝";
-  if (['zip', 'rar', '7z', 'tar'].includes(ext)) return "📦";
-
-  return "📄";
-}
-
 function selectAllChips() {
   isAllSelected = true;
-  document.querySelectorAll(".chip").forEach(el => el.classList.add("selected"));
+  document.querySelectorAll(".chip").forEach(chip => chip.classList.add("selected"));
   input.select();
 }
 
@@ -680,26 +837,27 @@ function deselectChips() {
 
   if (!isAllSelected) return;
   isAllSelected = false;
-  document.querySelectorAll(".chip").forEach(el => el.classList.remove("selected"));
+  document.querySelectorAll(".chip").forEach(chip => chip.classList.remove("selected"));
 }
 
 function renderChips() {
   const chipsArea = document.getElementById("chips-area");
-  chipsArea.innerHTML = "";
+  chipsArea.replaceChildren();
 
   state.activeFilters.forEach((filter, index) => {
-    const chip = document.createElement("div");
-    chip.className = "chip";
-    chip.innerHTML = `
-      ${escapeHtml(filter)}
-      <span class="chip-close" title="${RESULT_TEXT.removeFilter}" aria-label="${RESULT_TEXT.removeFilter}">×</span>
-    `;
+    const chip = el("div", "chip");
+    if (isPrivateFilter(filter)) chip.dataset.private = "";
 
-    chip.querySelector(".chip-close").onclick = (e) => {
+    const close = el("span", "chip-close");
+    close.title = RESULT_TEXT.removeFilter;
+    close.setAttribute("aria-label", RESULT_TEXT.removeFilter);
+    close.appendChild(iconElement("x"));
+    close.onclick = (e) => {
       e.stopPropagation();
       removeFilter(index);
     };
 
+    chip.append(el("span", "chip-label", filter), close);
     chipsArea.appendChild(chip);
   });
 
@@ -708,6 +866,7 @@ function renderChips() {
   } else if (placeholderKey === "private") {
     setPlaceholder("default");
   }
+  renderKeyHints();
 }
 
 function removeFilter(index) {
@@ -737,12 +896,12 @@ async function render() {
   if (isInputEmpty && !hasChips && !state.showRecents && state.results.length === 0) {
     resultsContainer.classList.add("hidden");
     searchLoader.classList.add("hidden");
-    resultsList.innerHTML = "";
+    resultsList.replaceChildren();
     updateContainerMinimalState();
     return;
   }
 
-  resultsList.innerHTML = "";
+  resultsList.replaceChildren();
   let items = [];
 
   const isPrivateMode = hasPrivateFilter();
@@ -779,14 +938,15 @@ async function render() {
   if (isCmdIntent && !isInputEmpty) {
     // Whatever follows the filter word, whichever alias was used ("/cmd", "/esegui", …).
     const command = restOfQuery;
-    const cmdItem = document.createElement("li");
-    cmdItem.className = `result-item cmd-item ${state.selectedIndex === 0 ? "selected" : ""}`;
-    cmdItem.innerHTML = `
-        <span class="result-icon">💻</span>
-        <div class="result-content">
-          <span class="result-name">${RESULT_TEXT.runCommand}</span>
-          <span class="result-path">${command.length > 0 ? `“${escapeHtml(command)}”` : RESULT_TEXT.typeCommand}</span>
-        </div>`;
+    const cmdItem = resultRow({
+      name: RESULT_TEXT.runCommand,
+      detail: command.length > 0 ? `“${command}”` : RESULT_TEXT.typeCommand,
+      iconName: "square-terminal",
+      action: ACTION_LABELS.run,
+      badge: KIND_LABELS.terminal_command,
+      selected: state.selectedIndex === 0
+    });
+    cmdItem.classList.add("cmd-item");
 
     if (command.length > 0) {
       cmdItem.onclick = () => openFile(command, "terminal_command", RESULT_TEXT.runPrefix + command);
@@ -799,9 +959,6 @@ async function render() {
   }
 
   if (isWebIntent && !isInputEmpty) {
-    const webItem = document.createElement("li");
-    webItem.className = `result-item web-search-item ${(state.selectedIndex === 0 && !isCmdIntent) ? "selected" : ""}`;
-
     const engineLabel = WEB_ENGINE_LABELS[activeEngine];
     let searchLabel;
     if (isPrivateMode) {
@@ -810,14 +967,15 @@ async function render() {
       searchLabel = engineLabel ? RESULT_TEXT.searchWith(engineLabel) : RESULT_TEXT.searchWeb;
     }
 
-    const searchIcon = isPrivateMode ? "🕶️" : "🌍";
-
-    webItem.innerHTML = `
-        <span class="result-icon">${searchIcon}</span>
-        <div class="result-content">
-          <span class="result-name">${searchLabel}</span>
-          <span class="result-path">“${escapeHtml(webQuery)}”</span>
-        </div>`;
+    const webItem = resultRow({
+      name: searchLabel,
+      detail: `“${webQuery}”`,
+      iconName: isPrivateMode ? "venetian-mask" : "search",
+      action: ACTION_LABELS.search,
+      badge: KIND_LABELS.web_search,
+      selected: state.selectedIndex === 0 && !isCmdIntent
+    });
+    webItem.classList.add("web-search-item");
 
     webItem.onclick = () => openWeb(webQuery, activeEngine);
     webItem.onmouseenter = () => { state.selectedIndex = isCmdIntent ? 1 : 0; renderStyles(); };
@@ -826,20 +984,21 @@ async function render() {
   }
 
   if (items.length === 0 && !isWebIntent && !isCmdIntent && (!isInputEmpty || hasChips)) {
-    const noResults = document.createElement("div");
-    noResults.className = "empty-state";
-    if (hasChips && isInputEmpty) {
-      noResults.innerHTML = `
-        <span>${RESULT_TEXT.noResultsWithFilters}</span>
-      `;
-    } else {
-      noResults.innerHTML = `
-        <span>${escapeHtml(RESULT_TEXT.noResults(rawInput))}</span>
-      `;
-    }
+    const noResults = el("li", "empty-state");
+    noResults.setAttribute("role", "presentation");
+    const tile = el("span", "empty-icon");
+    tile.appendChild(iconElement("search-x"));
+    const message = hasChips && isInputEmpty ? RESULT_TEXT.noResultsWithFilters : RESULT_TEXT.noResults(rawInput);
+    noResults.append(tile, el("span", "empty-title", message));
     resultsList.appendChild(noResults);
     updateContainerMinimalState();
     return;
+  }
+
+  if (items === state.recentFiles && items.length > 0) {
+    const header = el("li", "section-title", RECENTS_TITLE);
+    header.setAttribute("role", "presentation");
+    resultsList.appendChild(header);
   }
 
   items.forEach((item, index) => {
@@ -852,28 +1011,22 @@ async function render() {
     const name = typeof item === 'string' ? path.split('\\').pop() : (item.name || path.split('\\').pop());
     const iconData = (typeof item !== 'string' && item.icon_data) ? item.icon_data : null;
 
-    const li = document.createElement("li");
-    li.className = `result-item ${isSelected ? "selected" : ""}`;
-    li.dataset.path = path;
-    li.dataset.kind = kind;
-
-    let iconHtml;
-    if (iconData) {
-      iconHtml = `<img src="${escapeHtml(iconData)}" class="app-icon" alt="" />`;
-    } else {
-      iconHtml = `<span class="result-icon">${getFileIcon(path, kind)}</span>`;
-    }
-
     // Built-in paths (rocket:…, cmd:…, hwnd:…) are internal ids: the second line describes
     // the item instead. Files, folders, drives and sites keep their path or address.
-    const displayPath = resultDetail(item, path, kind);
-
-    li.innerHTML = `
-      ${iconHtml}
-      <div class="result-content">
-        <span class="result-name">${escapeHtml(name)}</span>
-        <span class="result-path">${escapeHtml(displayPath)}</span>
-      </div>`;
+    const li = resultRow({
+      name,
+      detail: resultDetail(item, path, kind),
+      iconName: iconNameFor(path, kind),
+      iconData,
+      action: actionLabel(path, kind),
+      kind,
+      badge: kindLabel(path, kind),
+      selected: isSelected,
+      revealable: canRevealInExplorer(path, kind)
+    });
+    li.dataset.path = path;
+    li.dataset.kind = kind;
+    if (kind === "file" || kind === "folder" || kind === "drive") li.title = path;
 
     li.onclick = () => openFile(path, kind, name);
     li.onmouseenter = () => {
@@ -883,19 +1036,19 @@ async function render() {
     resultsList.appendChild(li);
   });
 
+  // A new list starts from the top (the container would otherwise keep the scroll position of the
+  // previous one); later moves keep the selected row in view through renderStyles().
+  if (state.selectedIndex === 0) {
+    resultsContainer.scrollTop = 0;
+  } else {
+    resultsList.querySelector(".result-item.selected")?.scrollIntoView({ block: "nearest" });
+  }
+
   const renderedAnyItems = items.length > 0;
   let showedEmptyRecentMessage = false;
 
   if (isInputEmpty && state.showRecents && items.length === 0 && !hasChips) {
-    const emptyMessage = document.createElement("div");
-    emptyMessage.className = "empty-recents-message";
-    emptyMessage.innerHTML = `
-      <span class="result-icon">ℹ️</span>
-      <div class="result-content">
-        <span class="result-name">${RESULT_TEXT.recentsEmptyTitle}</span>
-        <span class="result-path">${RESULT_TEXT.recentsEmptyHint}</span>
-      </div>`;
-    resultsList.appendChild(emptyMessage);
+    resultsList.appendChild(infoRow("rotate-ccw-clock", RESULT_TEXT.recentsEmptyTitle, RESULT_TEXT.recentsEmptyHint));
     showedEmptyRecentMessage = true;
   }
 
@@ -919,18 +1072,51 @@ function updateContainerMinimalState() {
   } else {
     container.classList.remove("minimal-state");
   }
+  renderKeyHints();
 }
 
 function renderStyles() {
   const items = document.querySelectorAll(".result-item");
   items.forEach((item, index) => {
-    if (index === state.selectedIndex) {
-      item.classList.add("selected");
-      item.scrollIntoView({ block: "nearest" });
-    } else {
-      item.classList.remove("selected");
-    }
+    const isSelected = index === state.selectedIndex;
+    item.classList.toggle("selected", isSelected);
+    item.setAttribute("aria-selected", String(isSelected));
+    if (isSelected) item.scrollIntoView({ block: "nearest" });
   });
+  renderKeyHints();
+}
+
+// The action bar at the bottom: brand on the left, the keys that work right now on the right. The
+// Enter key is filled with the accent and named after what it does on the selected row.
+function renderKeyHints() {
+  if (!keyHints) return;
+  const hints = [];
+  const hint = (keys, label, primary = false) => hints.push({ keys, label, primary });
+  const escLabel = input.value.length > 0 || state.activeFilters.length > 0 ? KEY_HINT_TEXT.clear : KEY_HINT_TEXT.hide;
+
+  if (!shortcutDropdown.classList.contains("hidden")) {
+    hint(["↑", "↓"], KEY_HINT_TEXT.choose);
+    hint(["↵"], KEY_HINT_TEXT.confirm, true);
+    hint(["Esc"], KEY_HINT_TEXT.close);
+  } else if (!settingsPanel.classList.contains("hidden")) {
+    hint(["↑", "↓", "←", "→"], KEY_HINT_TEXT.move);
+    hint(["↵"], KEY_HINT_TEXT.activate, true);
+    hint(["Tab"], KEY_HINT_TEXT.backToSearch);
+  } else {
+    const rows = document.querySelectorAll(".result-item");
+    const selected = rows[state.selectedIndex];
+    if (rows.length > 1) hint(["↑", "↓"], KEY_HINT_TEXT.choose);
+    if (selected && selected.dataset.action) hint(["↵"], selected.dataset.action, true);
+    if (selected && selected.dataset.reveal !== undefined) hint(["Ctrl", "↵"], KEY_HINT_TEXT.revealInExplorer);
+    hint(["Tab"], KEY_HINT_TEXT.settings);
+    hint(["Esc"], escLabel);
+  }
+
+  keyHints.replaceChildren(...hints.map(({ keys, label, primary }) => {
+    const item = el("span", "hint-item");
+    item.append(...keys.map((key) => keyCap(key, primary && key === "↵")), label);
+    return item;
+  }));
 }
 
 async function openFile(path, kind, name) {
@@ -951,7 +1137,7 @@ async function openFile(path, kind, name) {
 
     if (!state.showRecents) {
       await invoke("reset_window");
-      lastWindowHeight = 65;
+      lastWindowHeight = WINDOW_MIN_HEIGHT;
     }
     render();
     return;
@@ -998,7 +1184,7 @@ async function openFile(path, kind, name) {
 
     if (!state.showRecents) {
       await invoke("reset_window");
-      lastWindowHeight = 65;
+      lastWindowHeight = WINDOW_MIN_HEIGHT;
     }
 
     render();
@@ -1024,7 +1210,7 @@ async function openFile(path, kind, name) {
 
     if (!state.showRecents) {
       await invoke("reset_window");
-      lastWindowHeight = 65;
+      lastWindowHeight = WINDOW_MIN_HEIGHT;
     }
 
     render();
@@ -1039,7 +1225,7 @@ async function openFile(path, kind, name) {
 
     if (!state.showRecents) {
       await invoke("reset_window");
-      lastWindowHeight = 65;
+      lastWindowHeight = WINDOW_MIN_HEIGHT;
     } else {
       await invoke("resize_window", { height: WINDOW_MAX_HEIGHT });
       lastWindowHeight = WINDOW_MAX_HEIGHT;
@@ -1057,13 +1243,6 @@ async function openFile(path, kind, name) {
     return;
   }
 
-  if (path === "rocket:reset_position") {
-    await invoke("reset_window");
-    input.value = "";
-    render();
-    return;
-  }
-
   if (path === "rocket:quit") {
     await invoke("quit_app");
     return;
@@ -1077,7 +1256,7 @@ async function openFile(path, kind, name) {
 
     if (!state.showRecents) {
       await invoke("reset_window");
-      lastWindowHeight = 65;
+      lastWindowHeight = WINDOW_MIN_HEIGHT;
     }
 
     render();
@@ -1120,25 +1299,14 @@ async function openFile(path, kind, name) {
     renderChips();
     setPlaceholder("refreshing");
 
-    resultsList.innerHTML = `
-      <div class="empty-recents-message">
-        <span class="result-icon" style="animation: spin 2s linear infinite;">⏳</span>
-        <div class="result-content">
-          <span class="result-name">${RESULT_TEXT.refreshingTitle}</span>
-          <span class="result-path">${RESULT_TEXT.refreshingHint}</span>
-        </div>
-      </div>`;
+    resultsList.replaceChildren(infoRow("loader-circle", RESULT_TEXT.refreshingTitle, RESULT_TEXT.refreshingHint, true));
     resultsContainer.classList.remove("hidden");
+    updateContainerMinimalState();
     await invoke("trigger_index_refresh");
     return;
   }
 
   if (kind === "filter") {
-    // input.value = path;
-    // input.focus();
-    // input.dispatchEvent(new Event('input'));
-    // return;
-
     state.activeFilters.push(path.trim());
     renderChips();
 
@@ -1159,7 +1327,7 @@ async function openFile(path, kind, name) {
 
     if (!state.showRecents) {
       await invoke("reset_window");
-      lastWindowHeight = 65;
+      lastWindowHeight = WINDOW_MIN_HEIGHT;
     }
 
     render();
@@ -1174,7 +1342,7 @@ async function openFile(path, kind, name) {
 
     if (!state.showRecents) {
       await invoke("reset_window");
-      lastWindowHeight = 65;
+      lastWindowHeight = WINDOW_MIN_HEIGHT;
     }
 
     render();
@@ -1192,7 +1360,7 @@ async function openFile(path, kind, name) {
 
   if (!state.showRecents) {
     await invoke("reset_window");
-    lastWindowHeight = 65;
+    lastWindowHeight = WINDOW_MIN_HEIGHT;
   }
   render();
 }
@@ -1205,12 +1373,11 @@ async function showInExplorer(path) {
 
   if (!state.showRecents) {
     await invoke("reset_window");
-    lastWindowHeight = 65;
+    lastWindowHeight = WINDOW_MIN_HEIGHT;
   }
   render();
 }
 
-// let debounceTimeout;
 input.addEventListener("input", async (e) => {
   let val = input.value;
 
@@ -1235,9 +1402,6 @@ input.addEventListener("input", async (e) => {
     await toggleSettings();
   }
 
-  // clearTimeout(debounceTimeout);
-
-  // debounceTimeout = setTimeout(async () => {
   const query = [...state.activeFilters.filter(f => !isPrivateFilter(f)), val].join(" ").trim();
 
   currentSearchId++;
@@ -1253,7 +1417,7 @@ input.addEventListener("input", async (e) => {
     resultsContainer.classList.add("hidden");
     if (!state.showRecents && settingsPanel.classList.contains("hidden")) {
       await invoke("reset_window");
-      lastWindowHeight = 65;
+      lastWindowHeight = WINDOW_MIN_HEIGHT;
     }
     render();
     return;
@@ -1321,7 +1485,6 @@ input.addEventListener("input", async (e) => {
   state.results = results;
 
   render();
-  // }, 150);
 });
 
 document.addEventListener('keydown', async (e) => {
@@ -1388,7 +1551,7 @@ document.addEventListener('keydown', async (e) => {
       lastWindowHeight = WINDOW_MAX_HEIGHT;
     } else {
       await invoke("reset_window");
-      lastWindowHeight = 65;
+      lastWindowHeight = WINDOW_MIN_HEIGHT;
     }
     return;
   }
@@ -1403,14 +1566,6 @@ document.addEventListener('keydown', async (e) => {
 
       input.dispatchEvent(new Event('input'));
       return;
-
-      // state.results = [];
-      // if (!state.showRecents) {
-      //   await invoke("reset_window");
-      //   lastWindowHeight = 65;
-      // }
-      // render();
-      // return;
     }
 
     if (input.value === "") {
@@ -1420,19 +1575,6 @@ document.addEventListener('keydown', async (e) => {
 
         input.dispatchEvent(new Event('input'));
         return;
-        // const fullQuery = state.activeFilters.join(" ");
-        // if (fullQuery.length === 0) {
-        //   state.results = [];
-        //   if (!state.showRecents) {
-        //     await invoke("reset_window");
-        //     lastWindowHeight = 65;
-        //   }
-        // } else {
-        //   const results = await invoke("search_files", { query: fullQuery });
-        //   state.results = results;
-        // }
-        // render();
-        // return;
       }
     }
   }
@@ -1467,42 +1609,10 @@ document.addEventListener('keydown', async (e) => {
       return;
     }
 
-    if (e.key === "ArrowRight") {
+    const arrows = { ArrowRight: [1, 0], ArrowLeft: [-1, 0], ArrowDown: [0, 1], ArrowUp: [0, -1] };
+    if (arrows[e.key]) {
       e.preventDefault();
-      settingsIndex = (settingsIndex + 1) % focusables.length;
-      renderSettingsFocus();
-    } else if (e.key === "ArrowLeft") {
-      e.preventDefault();
-      if (settingsIndex === -1) {
-        settingsIndex = focusables.length - 1;
-      } else {
-        settingsIndex = (settingsIndex - 1 + focusables.length) % focusables.length;
-      }
-      renderSettingsFocus();
-    } else if (e.key === "ArrowDown") {
-      e.preventDefault();
-      if (settingsIndex >= 0 && settingsIndex <= 3) {
-        settingsIndex = (settingsIndex <= 1) ? 4 : 5;
-      } else if (settingsIndex === 4 || settingsIndex === 5) {
-        settingsIndex = (settingsIndex === 4) ? 6 : 7;
-      } else if (settingsIndex === 6 || settingsIndex === 7) {
-        settingsIndex = settingsIndex - 6;
-      } else {
-        settingsIndex = 0;
-      }
-      renderSettingsFocus();
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      if (settingsIndex >= 0 && settingsIndex <= 3) {
-        settingsIndex = (settingsIndex <= 1) ? 6 : 7;
-      } else if (settingsIndex === 4 || settingsIndex === 5) {
-        settingsIndex = (settingsIndex === 4) ? 0 : 2;
-      } else if (settingsIndex === 6 || settingsIndex === 7) {
-        settingsIndex = (settingsIndex === 6) ? 4 : 5;
-      } else {
-        settingsIndex = focusables.length - 1;
-      }
-      renderSettingsFocus();
+      moveSettingsFocus(...arrows[e.key]);
     } else if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
 
@@ -1531,17 +1641,6 @@ document.addEventListener('keydown', async (e) => {
     return;
   }
 
-  // let useResults = input.value.trim() !== "" || state.activeFilters.length > 0;
-  // let items = (useResults) ? state.results : (state.showRecents ? state.recentFiles : []);
-
-  // if (items.length === 0) {
-  //   if (e.key === "Tab") {
-  //     e.preventDefault();
-  //     toggleSettings();
-  //   }
-  //   return;
-  // }
-
   const items = document.querySelectorAll(".result-item");
 
   if (items.length === 0) {
@@ -1563,15 +1662,8 @@ document.addEventListener('keydown', async (e) => {
   } else if (e.key === "Enter" && e.ctrlKey) {
     e.preventDefault();
     const selectedEl = items[state.selectedIndex];
-    if (selectedEl && selectedEl.dataset.path) {
-      const filePath = selectedEl.dataset.path;
-      const kind = selectedEl.dataset.kind;
-
-      if (kind !== 'command' && kind !== 'filter' && kind !== 'website' && kind !== 'terminal_command'
-        && !filePath.startsWith('rocket:') && !filePath.startsWith('cmd:') && !filePath.startsWith('nox:')
-        && !filePath.startsWith('http://') && !filePath.startsWith('https://') && !filePath.startsWith('hwnd:')) {
-        showInExplorer(filePath);
-      }
+    if (selectedEl && selectedEl.dataset.path && canRevealInExplorer(selectedEl.dataset.path, selectedEl.dataset.kind)) {
+      showInExplorer(selectedEl.dataset.path);
     }
   } else if (e.key === "Enter") {
     e.preventDefault();
@@ -1584,15 +1676,6 @@ document.addEventListener('keydown', async (e) => {
     if (selectedEl) {
       selectedEl.click();
     }
-
-    // const item = items[state.selectedIndex];
-    // if (item) {
-    //   const path = typeof item === 'string' ? item : item.path;
-    //   const kind = typeof item === 'string' ? 'file' : item.kind;
-    //   const name = typeof item === 'string' ? path.split('\\').pop() : (item.name || path.split('\\').pop());
-    //   openFile(path, kind, name);
-    // }
-
   } else if (e.key === "Tab") {
     e.preventDefault();
     if (commitTypedFilter(items)) {
@@ -1631,6 +1714,12 @@ window.addEventListener('focus', () => {
 });
 
 listen('reset_state', async () => {
+  // Short entrance every time the global shortcut or the tray shows the window; hiding stays
+  // instant. Removing and adding the class again restarts the CSS animation.
+  container.classList.remove("is-opening");
+  void container.offsetWidth;
+  container.classList.add("is-opening");
+
   input.value = "";
   state.activeFilters = [];
   renderChips();
@@ -1648,7 +1737,7 @@ listen('reset_state', async () => {
     lastWindowHeight = WINDOW_MAX_HEIGHT;
   } else {
     await invoke("reset_window");
-    lastWindowHeight = 65;
+    lastWindowHeight = WINDOW_MIN_HEIGHT;
   }
 });
 
@@ -1683,15 +1772,17 @@ shortcutDisplay.onclick = async (e) => {
   e.stopPropagation();
   if (shortcutDropdown.classList.contains("hidden")) {
     shortcutDropdown.classList.remove("hidden");
+    renderKeyHints();
     await renderDropdown();
   } else {
     shortcutDropdown.classList.add("hidden");
+    renderKeyHints();
   }
   checkDropdownSize();
 };
 
 async function renderDropdown() {
-  shortcutDropdown.innerHTML = `<div class="shortcut-option" style="cursor: default;">${SHORTCUT_TEXT.checking}</div>`;
+  shortcutDropdown.replaceChildren(el("div", "shortcut-option is-loading", SHORTCUT_TEXT.checking));
   const currentVal = shortcutDisplay.dataset.value;
 
   let availableShortcuts = [];
@@ -1702,7 +1793,7 @@ async function renderDropdown() {
     availableShortcuts = PRESET_SHORTCUTS.map(() => true);
   }
 
-  shortcutDropdown.innerHTML = "";
+  shortcutDropdown.replaceChildren();
 
   let sortedShortcuts = PRESET_SHORTCUTS.map((sc, i) => ({
     shortcut: sc,
@@ -1715,24 +1806,18 @@ async function renderDropdown() {
   });
 
   sortedShortcuts.forEach(({ shortcut, available }) => {
-    const div = document.createElement("div");
-    div.className = "shortcut-option";
-    div.textContent = formatShortcutForDisplay(shortcut);
+    const div = el("div", "shortcut-option", formatShortcutForDisplay(shortcut));
+    div.setAttribute("role", "option");
 
     if (shortcut === currentVal) {
       div.classList.add("active");
     }
 
     if (!available) {
+      // Faint text and a lock drawn by styles.css.
       div.classList.add("unavailable");
-      const lock = document.createElement("span");
-      lock.style.float = "right";
-      lock.textContent = "🔒";
-      div.append(" ", lock);
       div.title = SHORTCUT_TEXT.unavailable;
       div.setAttribute("aria-disabled", "true");
-      div.style.opacity = '0.5';
-      div.style.cursor = 'not-allowed';
     } else {
       div.onclick = () => applyShortcut(shortcut);
     }
@@ -1746,17 +1831,19 @@ async function renderDropdown() {
 // Which message the shortcut line shows ("updated" clears itself after 2 s).
 let shortcutMsgState = "";
 
-function showShortcutMessage(stateKey, color) {
+// Colour by outcome: styles.css paints .is-ok green and .is-error red.
+const SHORTCUT_MESSAGE_TONE = { updated: "is-ok", rejected: "is-error", failed: "is-error" };
+
+function showShortcutMessage(stateKey) {
   shortcutMsgState = stateKey;
   shortcutMsg.textContent = stateKey ? SHORTCUT_TEXT[stateKey] : "";
-  if (color) {
-    shortcutMsg.style.color = color;
-    shortcutMsg.style.fontSize = "12px";
-  }
+  shortcutMsg.classList.remove("is-ok", "is-error");
+  if (SHORTCUT_MESSAGE_TONE[stateKey]) shortcutMsg.classList.add(SHORTCUT_MESSAGE_TONE[stateKey]);
 }
 
 async function applyShortcut(newShortcut) {
   shortcutDropdown.classList.add("hidden");
+  renderKeyHints();
   updateWindowSize();
   shortcutDisplay.textContent = SHORTCUT_TEXT.applying;
   showShortcutMessage("");
@@ -1767,7 +1854,7 @@ async function applyShortcut(newShortcut) {
     if (success) {
       shortcutDisplay.textContent = formatShortcutForDisplay(newShortcut);
       shortcutDisplay.dataset.value = newShortcut;
-      showShortcutMessage("updated", "#4caf50");
+      showShortcutMessage("updated");
 
       setTimeout(() => {
         if (shortcutMsgState === "updated") showShortcutMessage("");
@@ -1777,11 +1864,11 @@ async function applyShortcut(newShortcut) {
       const current = await invoke("get_current_shortcut");
       shortcutDisplay.textContent = formatShortcutForDisplay(current);
       shortcutDisplay.dataset.value = current;
-      showShortcutMessage("rejected", "#ff5555");
+      showShortcutMessage("rejected");
     }
   } catch (err) {
     console.error(err);
-    showShortcutMessage("failed", "#ff5555");
+    showShortcutMessage("failed");
     loadCurrentShortcut();
   }
 }
@@ -1792,7 +1879,10 @@ input.addEventListener("click", () => {
 
 document.addEventListener("click", (e) => {
   if (!shortcutDisplay.contains(e.target) && !shortcutDropdown.contains(e.target)) {
-    shortcutDropdown.classList.add("hidden");
+    if (!shortcutDropdown.classList.contains("hidden")) {
+      shortcutDropdown.classList.add("hidden");
+      renderKeyHints();
+    }
     updateWindowSize();
   }
 
@@ -1840,7 +1930,7 @@ let lastWindowHeight = 0;
 
 if (!state.showRecents) {
   invoke("reset_window");
-  lastWindowHeight = 65;
+  lastWindowHeight = WINDOW_MIN_HEIGHT;
 } else {
   invoke("resize_window", { height: WINDOW_MAX_HEIGHT });
   lastWindowHeight = WINDOW_MAX_HEIGHT;
@@ -1873,7 +1963,7 @@ listen("index_refreshed", async () => {
   if (!state.showRecents) {
     resultsContainer.classList.add("hidden");
     await invoke("reset_window");
-    lastWindowHeight = 65;
+    lastWindowHeight = WINDOW_MIN_HEIGHT;
   } else {
     await invoke("resize_window", { height: WINDOW_MAX_HEIGHT });
     lastWindowHeight = WINDOW_MAX_HEIGHT;
@@ -1901,21 +1991,14 @@ async function checkInitialIndexing() {
     setPlaceholder("indexing");
 
     if (state.showRecents) {
-      resultsList.innerHTML = `
-        <div class="empty-recents-message">
-          <span class="result-icon" style="animation: spin 2s linear infinite;">⏳</span>
-          <div class="result-content">
-            <span class="result-name">${RESULT_TEXT.indexingTitle}</span>
-            <span class="result-path">${RESULT_TEXT.indexingHint}</span>
-          </div>
-        </div>`;
+      resultsList.replaceChildren(infoRow("loader-circle", RESULT_TEXT.indexingTitle, RESULT_TEXT.indexingHint, true));
       resultsContainer.classList.remove("hidden");
       await invoke("resize_window", { height: WINDOW_MAX_HEIGHT });
       lastWindowHeight = WINDOW_MAX_HEIGHT;
     } else {
       resultsContainer.classList.add("hidden");
       await invoke("reset_window");
-      lastWindowHeight = 65;
+      lastWindowHeight = WINDOW_MIN_HEIGHT;
     }
     updateContainerMinimalState();
 

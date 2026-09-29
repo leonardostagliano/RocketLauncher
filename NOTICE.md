@@ -33,6 +33,14 @@ Copyright © 2026 Leonardo Stagliano (modifications in RocketLauncher)
   `[lib]` section), an old uncompiled copy of `main.rs` (`backup.rs`), the template SVG assets and the unused
   `@tauri-apps/plugin-autostart` npm package. The MkDocs documentation site (`docs/`, `mkdocs.yml`, `overrides/` and
   its GitHub Pages workflow) was replaced by this repository's README.
+- **New look.** A new "Fumé" glass interface over the Windows material (Mica on Windows 11, Acrylic on Windows 10),
+  following the light or dark Windows theme; the Inter typeface bundled with the app instead of Montserrat from Google
+  Fonts; Lucide icons instead of emoji; a new app and tray icon ("Orbita"). Collapsed, the window shows only the
+  search bar; expanded, an action bar names what <kbd>Enter</kbd> does on the selected row. The settings are grouped
+  in two cards with the GPL notice, the scrollbar is a thin overlay-style bar. Third-party notices are in
+  [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+- **Updates.** The installed version comes from the build instead of a hardcoded string; the update check compares
+  versions numerically against this repository's releases and treats "no release yet" as up to date.
 
 All user-facing features of Velocmd 0.1.8 are kept, including the Nox Dimmer integration.
 

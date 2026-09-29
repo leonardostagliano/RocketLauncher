@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>RocketLauncher</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FCFDFE"/><stop offset="1" stop-color="#D8DEE8"/></linearGradient>
+    <!-- Front half of the orbit, in the ellipse's own (rotated) user space: y >= 540 is the half nearer to the viewer. -->
+    <clipPath id="front"><rect x="0" y="540" width="1024" height="484"/></clipPath>
+  </defs>
+  <rect x="24" y="24" width="976" height="976" rx="224" fill="url(#tile)"/>
+  <rect x="25.5" y="25.5" width="973" height="973" rx="222.5" fill="none" stroke="#0B1220" stroke-opacity="0.10" stroke-width="3"/>
+  <ellipse cx="512" cy="540" rx="392" ry="140" transform="rotate(28 512 540)" fill="none" stroke="#0A84FF" stroke-width="30" stroke-opacity="0.55"/>
+  <g transform="rotate(45 512 512) translate(512 512) scale(0.98) translate(-512 -526)">
+    <path d="M512 150C606 222 646 318 646 430V650C646 680 624 702 594 702H430C400 702 378 680 378 650V430C378 318 418 222 512 150Z" fill="#1B1B21"/>
+    <circle cx="512" cy="420" r="62" fill="#EEF2F7"/>
+    <path d="M378 520L290 608C278 620 272 636 272 652V742L378 690Z" fill="#4A4F5C"/>
+    <path d="M646 520L734 608C746 620 752 636 752 652V742L646 690Z" fill="#4A4F5C"/>
+    <path d="M512 752C556 800 566 846 512 902C458 846 468 800 512 752Z" fill="#FF7A3D"/>
+  </g>
+  <ellipse cx="512" cy="540" rx="392" ry="140" transform="rotate(28 512 540)" fill="none" stroke="#0A84FF" stroke-width="30" clip-path="url(#front)"/>
+</svg>

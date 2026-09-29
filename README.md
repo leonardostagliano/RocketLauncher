@@ -112,7 +112,7 @@ next free shortcut, so uninstall Velocmd or pick another shortcut.
 - **Recents.** When turned on, the last 10 items you opened appear as soon as the bar opens, ready for
   <kbd>Enter</kbd>. Only items that are safe to open again are saved: power confirmations, quit, cancel, filter
   suggestions and window handles never are, and private mode saves nothing.
-- **Stat mode.** Shows the launcher's own memory use (RAM) in the footer, refreshed every two seconds.
+- **Stat mode.** Shows the launcher's own memory use (RAM) in the search bar, refreshed every two seconds.
 - **Global shortcut picker.** Eight presets: <kbd>Win</kbd>+<kbd>Shift</kbd>+<kbd>.</kbd> (default),
   <kbd>Alt</kbd>+<kbd>Space</kbd>, <kbd>Win</kbd>+<kbd>Space</kbd>, <kbd>Ctrl</kbd>+<kbd>Space</kbd>,
   <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Space</kbd>, <kbd>Win</kbd>+<kbd>S</kbd>, <kbd>Alt</kbd>+<kbd>S</kbd> and
@@ -120,6 +120,10 @@ next free shortcut, so uninstall Velocmd or pick another shortcut.
   falls back to the first free preset if the saved one is taken.
 - **Settings panel.** Recents, run at startup, clear recents, reset settings (turns recents and stat mode off, run at
   startup on, and restores the default shortcut), the shortcut picker, the update check, help and stat mode.
+- **Glass look.** The window follows the Windows light or dark app theme and sits on the Windows material: Mica on
+  Windows 11, Acrylic on Windows 10. Closed, it shows only the search bar; open, a bar at the bottom names what
+  <kbd>Enter</kbd> does on the selected row. To run without the material, set the environment variable
+  `ROCKETLAUNCHER_MATERIAL=none` (`mica` and `acrylic` force one of the two).
 - **Update check.** At start-up and on request, RocketLauncher asks GitHub for this repository's latest release. When
   a newer one exists, the update button opens its page in your browser; the app never downloads or installs anything
   by itself.
@@ -255,6 +259,9 @@ commands and the Nox Dimmer integration all come from Velocmd. The changes made 
 since 2026-09-29 are summarised in [NOTICE.md](NOTICE.md) and listed in full in the git history.
 
 Nox Dimmer is a separate application by the same author and is not part of RocketLauncher.
+
+The interface bundles the Inter typeface (SIL Open Font License 1.1) and Lucide icons (ISC): see
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 RocketLauncher is free software, distributed under the GNU General Public License, version 3: see [LICENSE](LICENSE).
 It comes with **no warranty**.
