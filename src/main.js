@@ -148,6 +148,13 @@ const WEB_SEARCH_URLS = {
 // so "perche" and "perché" both count).
 const QUESTION_WORDS = new Set(["come", "cosa", "perche", "quando", "chi", "dove", "how", "what", "why", "when", "who"]);
 
+// File names, window titles of other apps and typed text are inserted as text, never as
+// HTML: a page title such as "<img onerror=…>" shown under /finestre must not run script.
+const HTML_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
+}
+
 // Lowercase and without accents, like fold_for_search in main.rs.
 function foldText(text) {
   return text
@@ -691,7 +698,7 @@ function renderChips() {
     const chip = document.createElement("div");
     chip.className = "chip";
     chip.innerHTML = `
-      ${filter}
+      ${escapeHtml(filter)}
       <span class="chip-close" title="${RESULT_TEXT.removeFilter}" aria-label="${RESULT_TEXT.removeFilter}">×</span>
     `;
 
@@ -785,7 +792,7 @@ async function render() {
         <span class="result-icon">💻</span>
         <div class="result-content">
           <span class="result-name">${RESULT_TEXT.runCommand}</span>
-          <span class="result-path">${command.length > 0 ? `“${command}”` : RESULT_TEXT.typeCommand}</span>
+          <span class="result-path">${command.length > 0 ? `“${escapeHtml(command)}”` : RESULT_TEXT.typeCommand}</span>
         </div>`;
 
     if (command.length > 0) {
@@ -816,7 +823,7 @@ async function render() {
         <span class="result-icon">${searchIcon}</span>
         <div class="result-content">
           <span class="result-name">${searchLabel}</span>
-          <span class="result-path">“${webQuery}”</span>
+          <span class="result-path">“${escapeHtml(webQuery)}”</span>
         </div>`;
 
     webItem.onclick = () => openWeb(webQuery, activeEngine);
@@ -834,7 +841,7 @@ async function render() {
       `;
     } else {
       noResults.innerHTML = `
-        <span>${RESULT_TEXT.noResults(rawInput)}</span>
+        <span>${escapeHtml(RESULT_TEXT.noResults(rawInput))}</span>
       `;
     }
     resultsList.appendChild(noResults);
@@ -859,7 +866,7 @@ async function render() {
 
     let iconHtml;
     if (iconData) {
-      iconHtml = `<img src="${iconData}" class="app-icon" alt="" />`;
+      iconHtml = `<img src="${escapeHtml(iconData)}" class="app-icon" alt="" />`;
     } else {
       iconHtml = `<span class="result-icon">${getFileIcon(path, kind)}</span>`;
     }
@@ -871,8 +878,8 @@ async function render() {
     li.innerHTML = `
       ${iconHtml}
       <div class="result-content">
-        <span class="result-name">${name}</span>
-        <span class="result-path">${displayPath}</span>
+        <span class="result-name">${escapeHtml(name)}</span>
+        <span class="result-path">${escapeHtml(displayPath)}</span>
       </div>`;
 
     li.onclick = () => openFile(path, kind, name);
@@ -1725,7 +1732,10 @@ async function renderDropdown() {
 
     if (!available) {
       div.classList.add("unavailable");
-      div.innerHTML += ' <span style="float: right;">🔒</span>';
+      const lock = document.createElement("span");
+      lock.style.float = "right";
+      lock.textContent = "🔒";
+      div.append(" ", lock);
       div.title = SHORTCUT_TEXT.unavailable;
       div.setAttribute("aria-disabled", "true");
       div.style.opacity = '0.5';
