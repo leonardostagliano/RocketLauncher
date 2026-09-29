@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Testi di tauri-bundler non coperti dalla localizzazione it-IT di WiX (default-locale-strings.xml). -->
+<WixLocalization Culture="it-it" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+  <String Id="LaunchApp">Avvia RocketLauncher</String>
+  <String Id="DowngradeErrorMessage">È già installata una versione più recente di RocketLauncher.</String>
+  <String Id="PathEnvVarFeature">Aggiunge la cartella di installazione di RocketLauncher alla variabile di ambiente PATH, così l'eseguibile si può avviare da qualsiasi posizione.</String>
+  <String Id="InstallAppFeature">Installa RocketLauncher.</String>
+</WixLocalization>

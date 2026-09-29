@@ -1,6 +1,9 @@
 [package]
 name = "rocket-launcher"
-version = "0.1.8"
+# Not the app version. The version lives only in package.json (tauri.conf.json: "version": "../package.json") and CI
+# overrides it with `tauri build --config`; build.rs aligns the executable's VERSIONINFO strings with it. Keeping this at
+# 0.0.0 means a release never touches Cargo.toml or Cargo.lock.
+version = "0.0.0"
 description = "Launcher e indicizzatore di file per Windows"
 authors = ["Leonardo Stagliano", "Yashvardhan Gupta"]
 license = "GPL-3.0-only"
@@ -8,6 +11,7 @@ edition = "2021"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+serde_json = "1.0"
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }

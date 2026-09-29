@@ -3237,7 +3237,7 @@ dependencies = [
 
 [[package]]
 name = "rocket-launcher"
-version = "0.1.8"
+version = "0.0.0"
 dependencies = [
  "base64 0.21.7",
  "bincode",
