@@ -1,0 +1,132 @@
+name: Windows release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# I push ravvicinati restano in coda invece di annullare un rilascio gia' in corso. Il gruppo dipende dal ref: un avvio
+# manuale da un altro branch (il cui job viene poi saltato) non deve prendere il posto di un rilascio di main in attesa.
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    # Etichetta esplicita, come ChessAdvisor: windows-2022 ha rustup e la funzionalita' VBScript che serve a light.exe
+    # di WiX per l'MSI (su windows-2025 e' opzionale). Un'etichetta fissa non cambia immagine sotto la toolchain.
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    # Solo valori statici o del contesto github: runner.temp non e' disponibile nell'env del job, va negli step.
+    env:
+      CI: 'true'
+      CARGO_TERM_COLOR: always
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout push with full history and tags
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+
+      # Solo git, gh e moduli integrati di Node: nessuna dipendenza installata prima di sapere se si rilascia.
+      - name: Calculate release version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PLAN: ${{ runner.temp }}/windows-release.json
+        run: |
+          node scripts/windows-release.mjs prepare
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install locked npm dependencies
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw "npm ci non riuscito (codice $LASTEXITCODE)." }
+
+      # rustup e' preinstallato sull'immagine: si aggiorna a stable invece di dipendere dalla toolchain dell'immagine.
+      - name: Set up Rust stable
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw "rustup toolchain install non riuscito (codice $LASTEXITCODE)." }
+          rustup default stable
+          if ($LASTEXITCODE -ne 0) { throw "rustup default non riuscito (codice $LASTEXITCODE)." }
+          rustc -Vv
+          cargo -V
+
+      # Unica action di terzi, fissata per commit: registro Cargo e dipendenze compilate (non il crate dell'app).
+      - name: Cache Cargo registry and dependencies
+        if: steps.version.outputs.skip != 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+
+      # npm test: node --test su scripts/*.test.mjs e tests/*.test.mjs, lo stesso elenco usato in locale.
+      - name: Test release scripts, update source and repository contract
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          npm test
+          if ($LASTEXITCODE -ne 0) { throw "npm test non riuscito (codice $LASTEXITCODE)." }
+
+      - name: Test Rust crate
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw "cargo test non riuscito (codice $LASTEXITCODE)." }
+
+      # La versione calcolata arriva a tauri build come --config {"version": ...}: la CLI la inoltra a cargo in
+      # TAURI_CONFIG (VERSIONINFO, getVersion) e la usa per NSIS e MSI. Nessun file del checkout viene riscritto.
+      # stage copia i tre file in release/ con i nomi degli asset e scrive SHA256SUMS.txt, che publish ricontrolla.
+      - name: Build NSIS installer, MSI and portable executable
+        if: steps.version.outputs.skip != 'true'
+        env:
+          RELEASE_PLAN: ${{ runner.temp }}/windows-release.json
+        run: |
+          node scripts/windows-release.mjs build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/windows-release.mjs stage
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Smoke test the release artifacts
+        if: steps.version.outputs.skip != 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-windows.ps1 -Version $env:RELEASE_VERSION -Directory release
+          if ($LASTEXITCODE -ne 0) { throw "Smoke test non riuscito (codice $LASTEXITCODE)." }
+
+      # Gli artefatti devono corrispondere esattamente al commit del tag: nessuno step puo' aver riscritto file versionati
+      # (Cargo.toml dalla CLI, Cargo.lock, package-lock.json) ne' lasciato file non ignorati.
+      - name: Verify the checkout is unchanged
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          $changes = git status --porcelain --untracked-files=all
+          if ($LASTEXITCODE -ne 0) { throw "git status non riuscito (codice $LASTEXITCODE)." }
+          if ($changes) {
+            $changes | ForEach-Object { Write-Host $_ }
+            throw 'Il build ha modificato il checkout: la release non corrisponderebbe al commit.'
+          }
+
+      - name: Publish complete GitHub Release
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PLAN: ${{ runner.temp }}/windows-release.json
+        run: |
+          node scripts/windows-release.mjs publish
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
