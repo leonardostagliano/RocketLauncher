@@ -39,6 +39,8 @@ Copyright © 2026 Leonardo Stagliano (modifications in RocketLauncher)
   search bar; expanded, an action bar names what <kbd>Enter</kbd> does on the selected row. The settings are grouped
   in two cards with the GPL notice, the scrollbar is a thin overlay-style bar. Third-party notices are in
   [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+- **Security.** Window titles of other applications, file names and typed text are always shown as plain text, and
+  the web view runs under a Content Security Policy.
 - **Updates.** The installed version comes from the build instead of a hardcoded string; the update check compares
   versions numerically against this repository's releases and treats "no release yet" as up to date.
 
