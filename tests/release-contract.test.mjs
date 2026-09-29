@@ -121,6 +121,13 @@ describe('release workflow', () => {
     assert.doesNotMatch(workflow, /npm run [^\n]* -- /, 'pwsh drops -- when it calls npm.ps1')
   })
 
+  it('checks out Cargo.toml with LF, the line ending the Tauri CLI rewrites it with at every build', () => {
+    // Con un checkout CRLF (core.autocrlf=true sui runner Windows) `git status` vedrebbe Cargo.toml modificato
+    // dopo `tauri build` e lo step "Verify the checkout is unchanged" fermerebbe ogni rilascio.
+    assert.match(read('.gitattributes'), /^src-tauri\/Cargo\.toml text eol=lf$/m)
+    assert.doesNotMatch(read('src-tauri/Cargo.toml'), /\r/, 'Cargo.toml must be LF in the working tree too')
+  })
+
   it('runs every scripts/*.test.mjs and tests/*.test.mjs through npm test', () => {
     const test = readJson('package.json').scripts.test
     assert.equal(test, 'node --test "scripts/*.test.mjs" "tests/*.test.mjs"')
