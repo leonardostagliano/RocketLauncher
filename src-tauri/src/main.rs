@@ -267,11 +267,504 @@ fn check_shortcuts_availability(app: AppHandle, shortcuts: Vec<String>) -> Vec<b
     let _ = app.global_shortcut().register(current.as_str());
     results
 }
+// ---------------------------------------------------------------------------
+// Search vocabulary
+//
+// The interface is Italian. Built-in entries are shown with their Italian (Windows 11) names
+// and keep the upstream English names as search aliases. The folded display name and the
+// folded aliases share the `name_lower` slice of an indexed item, separated by
+// ALIAS_SEPARATOR, so the binary layout of the index cache does not change.
+// ---------------------------------------------------------------------------
+
+/// Separates the display name from the aliases inside a search key. It cannot be typed, and it
+/// is stripped from queries, so a query never matches across two aliases.
+const ALIAS_SEPARATOR: char = '\u{1F}';
+
+/// A built-in entry: its target, its Italian display name and the other words that find it.
+struct CatalogEntry {
+    path: &'static str,
+    name: &'static str,
+    aliases: &'static [&'static str],
+}
+
+const fn entry(
+    path: &'static str,
+    name: &'static str,
+    aliases: &'static [&'static str],
+) -> CatalogEntry {
+    CatalogEntry { path, name, aliases }
+}
+
+/// A RocketLauncher command. Every command is listed by the /rocket filter at `list_score`;
+/// the `indexed` ones are also found by the general search (quit and close-window are only
+/// offered through /rocket, as upstream did).
+struct RocketCommand {
+    entry: CatalogEntry,
+    list_score: u16,
+    indexed: bool,
+}
+
+const fn rocket_command(
+    path: &'static str,
+    name: &'static str,
+    aliases: &'static [&'static str],
+    list_score: u16,
+    indexed: bool,
+) -> RocketCommand {
+    RocketCommand { entry: entry(path, name, aliases), list_score, indexed }
+}
+
+const ROCKET_COMMANDS: &[RocketCommand] = &[
+    rocket_command("rocket:help", "Guida di RocketLauncher", &["RocketLauncher: Help", "help", "aiuto", "guida", "documentazione"], 201, true),
+    rocket_command("rocket:settings", "Impostazioni di RocketLauncher", &["RocketLauncher Settings", "settings", "impostazioni", "opzioni", "preferenze"], 200, true),
+    rocket_command("rocket:toggle_recents", "Mostra/nascondi recenti", &["RocketLauncher: Toggle Recents", "toggle recents", "recenti", "attiva recenti", "disattiva recenti"], 199, true),
+    rocket_command("rocket:clear_recents", "Svuota recenti", &["RocketLauncher: Clear Recents", "clear recents", "cancella recenti"], 198, true),
+    rocket_command("rocket:refresh", "Aggiorna l'indice dei file", &["RocketLauncher: Refresh Index", "refresh index", "aggiorna indice", "reindicizza", "indicizza"], 195, true),
+    rocket_command("rocket:show_desktop", "Mostra desktop", &["Show Desktop", "desktop"], 194, true),
+    rocket_command("rocket:active_tabs", "Finestre aperte", &["Active Tabs", "tabs", "finestre", "schede"], 193, true),
+    rocket_command("rocket:quit", "Esci da RocketLauncher", &["Quit RocketLauncher", "quit", "exit", "esci", "chiudi rocketlauncher"], 192, false),
+    rocket_command("rocket:close_window", "Chiudi scheda o finestra attiva", &["Close Active Tab/Window", "close tab", "close window", "chiudi scheda", "chiudi finestra"], 191, false),
+    rocket_command("rocket:request_shutdown", "Arresta il sistema", &["Shutdown", "shut down", "power off", "spegni", "spegni il pc", "spegnimento"], 190, true),
+    rocket_command("rocket:media_play", "Multimediale: Riproduci/Pausa", &["Media: Play/Pause", "media", "play", "pause", "riproduci", "pausa"], 189, true),
+    rocket_command("rocket:media_next", "Multimediale: Brano successivo", &["Media: Next Track", "next track", "brano successivo", "traccia successiva"], 188, true),
+    rocket_command("rocket:media_prev", "Multimediale: Brano precedente", &["Media: Previous Track", "previous track", "brano precedente", "traccia precedente"], 187, true),
+    rocket_command("rocket:request_restart", "Riavvia il sistema", &["Restart", "reboot", "riavvia", "riavvia il pc", "riavvio"], 180, true),
+];
+
+/// Windows settings listed by /rocket after the RocketLauncher commands.
+const ROCKET_LIST_SYSTEM_ENTRIES: &[(CatalogEntry, u16)] = &[
+    (entry("ms-settings:startupapps", "App di avvio", &["Startup Apps", "avvio automatico", "esecuzione automatica"]), 175),
+    (entry("ms-settings:appsfeatures", "App installate (disinstalla)", &["Apps & Features (Uninstall)", "apps & features", "uninstall", "disinstalla"]), 174),
+    (entry("ms-settings:sound", "Impostazioni audio (volume)", &["Sound Settings (Volume)", "sound", "audio", "volume"]), 170),
+    (entry("ms-settings:display", "Impostazioni schermo (luminosità)", &["Display Settings (Brightness)", "display", "brightness", "schermo", "luminosità"]), 160),
+    (entry("ms-settings:windowsupdate", "Windows Update", &["aggiornamenti", "aggiornamenti di windows"]), 150),
+];
+
+/// Windows settings pages and system tools found by the general search. Names follow Windows 11
+/// in Italian; the upstream English name is always the first alias.
+const SYSTEM_ENTRIES: &[CatalogEntry] = &[
+    entry("ms-settings:startupapps", "App di avvio", &["Startup Apps", "avvio automatico", "esecuzione automatica"]),
+    entry("ms-settings:appsfeatures", "Disinstalla un programma", &["Uninstall Program", "uninstall", "disinstalla", "rimuovi app"]),
+    entry("ms-settings:appsfeatures", "App e funzionalità", &["Apps & Features", "apps and features"]),
+    entry("ms-settings:installed-apps", "App installate", &["Installed Apps", "programmi installati"]),
+    entry("ms-settings:windowsupdate", "Windows Update", &["aggiornamenti", "aggiornamenti di windows"]),
+    entry("ms-settings:display", "Impostazioni schermo", &["Display Settings", "display", "schermo", "monitor", "risoluzione", "luminosità"]),
+    entry("ms-settings:sound", "Impostazioni audio", &["Sound Settings", "sound", "audio", "volume"]),
+    entry("ms-settings:bluetooth", "Bluetooth e dispositivi", &["Bluetooth & other devices", "bluetooth", "dispositivi"]),
+    entry("ms-settings:network-wifi", "Impostazioni Wi-Fi", &["Wi-Fi Settings", "wifi", "rete wireless"]),
+    entry("ms-settings:personalization", "Personalizzazione", &["Personalization", "sfondo", "tema"]),
+    entry("ms-settings:taskbar", "Impostazioni della barra delle applicazioni", &["Taskbar Settings", "taskbar", "barra delle applicazioni"]),
+    entry("ms-settings:dateandtime", "Data e ora", &["Date & Time Settings", "date and time", "orologio", "fuso orario"]),
+    entry("ms-settings:powersleep", "Alimentazione e batteria", &["Power & Sleep Settings", "power", "sleep", "alimentazione", "sospensione", "batteria", "risparmio energia"]),
+    entry("ms-settings:storagesense", "Impostazioni di archiviazione", &["Storage Settings", "storage", "archiviazione", "spazio su disco", "sensore memoria"]),
+    entry("ms-settings:privacy-backgroundapps", "App in background", &["Background Apps"]),
+    entry("ms-settings:notifications", "Notifiche", &["Notifications & actions", "notifications"]),
+    entry("ms-settings:defaultapps", "App predefinite", &["Default Apps", "programmi predefiniti"]),
+    entry("cmd:control", "Pannello di controllo", &["Control Panel"]),
+    entry("cmd:appwiz.cpl", "Programmi e funzionalità", &["Uninstall Program (Classic)", "programs and features", "disinstalla (classico)"]),
+    entry("cmd:taskmgr", "Gestione attività", &["Task Manager", "taskmgr", "processi"]),
+    entry("cmd:msinfo32", "Informazioni di sistema", &["System Information", "msinfo"]),
+    entry("cmd:cmd", "Prompt dei comandi", &["Command Prompt", "cmd", "terminale"]),
+    entry("cmd:powershell", "PowerShell", &["terminale"]),
+    entry("cmd:regedit", "Editor del Registro di sistema", &["Registry Editor", "regedit", "registro"]),
+    entry("cmd:rundll32.exe sysdm.cpl,EditEnvironmentVariables", "Variabili d'ambiente", &["Environment Variables", "path", "variabili di sistema"]),
+    entry("cmd:sysdm.cpl", "Proprietà del sistema", &["System Properties", "nome computer"]),
+    entry("cmd:ncpa.cpl", "Connessioni di rete", &["Network Connections", "schede di rete"]),
+    entry("cmd:diskmgmt.msc", "Gestione disco", &["Disk Management", "partizioni"]),
+    entry("cmd:devmgmt.msc", "Gestione dispositivi", &["Device Manager", "driver"]),
+    entry("cmd:services.msc", "Servizi", &["Services"]),
+    entry("cmd:gpedit.msc", "Editor Criteri di gruppo locali", &["Group Policy Editor", "gpedit", "criteri di gruppo"]),
+    entry("cmd:resmon", "Monitoraggio risorse", &["Resource Monitor"]),
+    entry("cmd:eventvwr.msc", "Visualizzatore eventi", &["Event Viewer", "registro eventi"]),
+];
+
+/// Nox Dimmer commands (a separate app by the upstream author, driven over its local TCP port).
+const NOX_COMMANDS: &[(CatalogEntry, u16)] = &[
+    (entry("nox:open", "Nox: Apri", &["Nox: Open", "open", "apri", "avvia"]), 210),
+    (entry("nox:quit", "Nox: Esci", &["Nox: Quit", "quit", "esci", "chiudi"]), 200),
+    (entry("nox:hyper_toggle", "Nox: Attiva/disattiva modalità Hyper", &["Nox: Toggle Hyper Mode", "hyper"]), 199),
+    (entry("nox:brightness_up", "Nox: Aumenta oscuramento (+10%)", &["Nox: Increase Dimness (+10%)", "increase", "aumenta", "più scuro"]), 198),
+    (entry("nox:brightness_down", "Nox: Riduci oscuramento (-10%)", &["Nox: Decrease Dimness (-10%)", "decrease", "riduci", "più chiaro"]), 197),
+    (entry("nox:check_updates", "Nox: Controlla aggiornamenti", &["Nox: Check for Updates", "updates", "aggiornamenti"]), 195),
+    (entry("nox:help", "Nox: Guida (GitHub)", &["Nox: Help (GitHub)", "help", "guida", "aiuto"]), 194),
+];
+
+const NOX_INSTALL: CatalogEntry = entry("nox:install", "Nox: Installa Nox Dimmer", &["Nox: Install Nox Dimmer"]);
+
+/// Preset websites listed by /web (and by the private-mode chip alone). Italian editions are
+/// used where the site has one.
+const WEB_PRESETS: &[(CatalogEntry, u16)] = &[
+    (entry("https://www.google.it", "Google", &[]), 200),
+    (entry("https://www.youtube.com", "YouTube", &[]), 199),
+    (entry("https://claude.ai", "Claude", &[]), 198),
+    (entry("https://gemini.google.com", "Gemini", &[]), 197),
+    (entry("https://chatgpt.com", "ChatGPT", &[]), 196),
+    (entry("https://github.com", "GitHub", &[]), 195),
+    (entry("https://www.reddit.com", "Reddit", &[]), 194),
+    (entry("https://twitter.com", "X (Twitter)", &[]), 193),
+    (entry("https://www.instagram.com", "Instagram", &[]), 192),
+    (entry("https://www.linkedin.com", "LinkedIn", &[]), 191),
+    (entry("https://stackoverflow.com", "Stack Overflow", &[]), 190),
+    (entry("https://mail.google.com", "Gmail", &[]), 189),
+    (entry("https://drive.google.com", "Google Drive", &[]), 188),
+    (entry("https://www.notion.so", "Notion", &[]), 187),
+    (entry("https://discord.com", "Discord", &[]), 186),
+    (entry("https://open.spotify.com", "Spotify", &[]), 185),
+    (entry("https://www.amazon.it", "Amazon", &[]), 184),
+    (entry("https://it.wikipedia.org", "Wikipedia", &[]), 183),
+    (entry("https://github.com/leonardostagliano/RocketLauncher#readme", "RocketLauncher su GitHub", &["RocketLauncher Docs", "docs", "documentazione", "guida"]), 182),
+    (entry("https://yashvardhang.dev", "YashvardhanG", &[]), 181),
+];
+
+const THIS_PC: CatalogEntry = entry(
+    "cmd:explorer shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}",
+    "Questo PC",
+    &["This PC", "pc", "computer", "my computer", "risorse del computer"],
+);
+
+const RECYCLE_BIN: CatalogEntry = entry("cmd:explorer shell:RecycleBinFolder", "Cestino", &["Recycle Bin", "trash"]);
+
+/// A user folder under %USERPROFILE%: its physical (English) directory name and the name
+/// Explorer shows for it in Italian.
+struct KnownFolder {
+    dir: &'static str,
+    name: &'static str,
+    aliases: &'static [&'static str],
+}
+
+const KNOWN_FOLDERS: &[KnownFolder] = &[
+    KnownFolder { dir: "Downloads", name: "Download", aliases: &["Downloads", "scaricati"] },
+    KnownFolder { dir: "Pictures", name: "Immagini", aliases: &["Pictures", "foto"] },
+    KnownFolder { dir: "Documents", name: "Documenti", aliases: &["Documents"] },
+    KnownFolder { dir: "Music", name: "Musica", aliases: &["Music"] },
+    KnownFolder { dir: "Videos", name: "Video", aliases: &["Videos"] },
+    KnownFolder { dir: "Desktop", name: "Desktop", aliases: &[] },
+];
+
+/// Upstream shows the Pictures folder as "Gallery" too; Windows 11 calls that view "Galleria".
+const GALLERY: KnownFolder = KnownFolder { dir: "Pictures", name: "Galleria", aliases: &["Gallery"] };
+
+/// Lowercases `text` and removes the accents from Latin letters, so "attivita" finds
+/// "Gestione attività" and "perche" finds "perché". Typographic apostrophes become straight.
+fn fold_for_search(text: &str) -> String {
+    if text.is_ascii() {
+        return text.to_ascii_lowercase();
+    }
+    let mut folded = String::with_capacity(text.len());
+    for ch in text.chars() {
+        for lower in ch.to_lowercase() {
+            folded.push(fold_char(lower));
+        }
+    }
+    folded
+}
+
+fn fold_char(ch: char) -> char {
+    match ch {
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' => 'a',
+        'ç' => 'c',
+        'è' | 'é' | 'ê' | 'ë' => 'e',
+        'ì' | 'í' | 'î' | 'ï' => 'i',
+        'ñ' => 'n',
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' => 'o',
+        'ù' | 'ú' | 'û' | 'ü' => 'u',
+        'ý' | 'ÿ' => 'y',
+        '\u{2018}' | '\u{2019}' => '\'',
+        other => other,
+    }
+}
+
+/// Builds the search key stored in the `name_lower` slice: the folded display name, then each
+/// folded alias that is not already there, separated by ALIAS_SEPARATOR.
+fn search_key(name: &str, aliases: &[&str]) -> String {
+    let mut key = fold_for_search(name);
+    for alias in aliases {
+        let folded = fold_for_search(alias);
+        if folded.is_empty() || key.split(ALIAS_SEPARATOR).any(|segment| segment == folded) {
+            continue;
+        }
+        key.push(ALIAS_SEPARATOR);
+        key.push_str(&folded);
+    }
+    key
+}
+
+/// How well a folded query matches a search key, looking at each alias on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum NameMatch {
+    None,
+    Contains,
+    Prefix,
+    Exact,
+}
+
+fn name_match(key: &str, query: &str) -> NameMatch {
+    let mut best = NameMatch::None;
+    for segment in key.split(ALIAS_SEPARATOR) {
+        let quality = if segment == query {
+            NameMatch::Exact
+        } else if segment.starts_with(query) {
+            NameMatch::Prefix
+        } else if segment.contains(query) {
+            NameMatch::Contains
+        } else {
+            NameMatch::None
+        };
+        if quality > best {
+            best = quality;
+            if best == NameMatch::Exact {
+                break;
+            }
+        }
+    }
+    best
+}
+
+fn catalog_entry_matches(entry_name: &str, aliases: &[&str], query: &str) -> bool {
+    query.is_empty() || name_match(&search_key(entry_name, aliases), query) != NameMatch::None
+}
+
+/// Rows added on top of the general results (This PC, Gallery, user folders) need a real hint
+/// from the user: at least two characters that start one of their names or one of the words in
+/// them. A plain substring test would add them for almost every single letter typed.
+fn pinned_entry_matches(entry_name: &str, aliases: &[&str], query: &str) -> bool {
+    if query.chars().count() < 2 {
+        return false;
+    }
+    search_key(entry_name, aliases)
+        .split(ALIAS_SEPARATOR)
+        .any(|alias| alias.starts_with(query) || alias.split(' ').any(|word| word.starts_with(query)))
+}
+
+/// What a `@word` or `/word` token in the query asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FilterToken {
+    /// Open windows and browser tabs.
+    Tabs,
+    /// RocketLauncher commands and the main Windows settings.
+    Rocket,
+    Nox,
+    /// Preset websites and typed URLs.
+    Web,
+    /// Private mode: web searches and links open in an incognito window.
+    Private,
+    ThisPc,
+    Apps,
+    Folders,
+    Files,
+    Drives,
+    /// Paths on one drive (`/c` or `/c:`).
+    DriveLetter(char),
+    /// Built-in commands of the general index (Windows settings and tools).
+    Commands,
+    /// Handled by the interface only (run a command, web search engines).
+    FrontendOnly,
+    /// Anything else is a file extension (`/pdf`).
+    Extension(String),
+}
+
+/// Maps a filter word (without its `@` or `/`) to what it filters. English words from upstream
+/// and their Italian equivalents are both accepted; the word is accent-folded first, so `/unità`
+/// and `/unita` are the same. Keep FILTER_WORDS in src/main.js in sync with this list.
+fn classify_filter(word: &str) -> FilterToken {
+    let word = fold_for_search(word);
+    match word.as_str() {
+        "tabs" | "active" | "window" | "windows" | "finestre" | "finestra" | "schede" | "scheda" => FilterToken::Tabs,
+        "rocket" | "rocketlauncher" | "settings" | "comandi" | "impostazioni" => FilterToken::Rocket,
+        "nox" | "nox-dimmer" | "noxdimmer" => FilterToken::Nox,
+        "web" | "website" | "websites" | "site" | "sites" | "url" | "sito" | "siti" => FilterToken::Web,
+        "p" | "privato" | "privata" | "incognito" => FilterToken::Private,
+        "pc" | "thispc" | "computer" | "questopc" => FilterToken::ThisPc,
+        "app" | "apps" | "application" | "applications" | "exe" | "lnk" | "applicazione" | "applicazioni"
+        | "programma" | "programmi" => FilterToken::Apps,
+        "folder" | "folders" | "directory" | "directories" | "dir" | "dirs" | "cartella" | "cartelle" => {
+            FilterToken::Folders
+        }
+        "file" | "files" => FilterToken::Files,
+        "drive" | "drives" | "disk" | "disks" | "unita" | "disco" | "dischi" => FilterToken::Drives,
+        "setting" | "config" | "setup" | "impostazione" | "configurazione" => FilterToken::Commands,
+        "cmd" | "esegui" | "search" | "cerca" | "google" | "bing" | "duck" | "duckduckgo" => FilterToken::FrontendOnly,
+        _ => {
+            let mut chars = word.chars();
+            match (chars.next(), chars.next(), chars.next()) {
+                (Some(letter), None, _) if letter.is_ascii_alphabetic() => FilterToken::DriveLetter(letter),
+                (Some(letter), Some(':'), None) if letter.is_ascii_alphabetic() => FilterToken::DriveLetter(letter),
+                _ => FilterToken::Extension(word),
+            }
+        }
+    }
+}
+
+fn path_has_extension(path: &str, extension: &str) -> bool {
+    let path = path.as_bytes();
+    let extension = extension.as_bytes();
+    path.len() > extension.len()
+        && path[path.len() - extension.len() - 1] == b'.'
+        && path[path.len() - extension.len()..].eq_ignore_ascii_case(extension)
+}
+
+/// Whether an item of `kind` at `path` is kept by every category, drive and extension filter.
+fn passes_filters(filters: &[FilterToken], kind: ItemKind, path: &str) -> bool {
+    filters.iter().all(|filter| match filter {
+        FilterToken::Apps => {
+            kind == ItemKind::App || path_has_extension(path, "exe") || path_has_extension(path, "lnk")
+        }
+        FilterToken::Folders => kind == ItemKind::Folder,
+        FilterToken::Files => kind == ItemKind::File,
+        FilterToken::Drives => kind == ItemKind::Drive,
+        FilterToken::Commands => kind == ItemKind::Command,
+        FilterToken::DriveLetter(letter) => {
+            let bytes = path.as_bytes();
+            bytes.len() >= 2 && bytes[0].eq_ignore_ascii_case(&(*letter as u8)) && bytes[1] == b':'
+        }
+        FilterToken::Extension(extension) => path_has_extension(path, extension),
+        FilterToken::Tabs
+        | FilterToken::Rocket
+        | FilterToken::Nox
+        | FilterToken::Web
+        | FilterToken::Private
+        | FilterToken::ThisPc
+        | FilterToken::FrontendOnly => true,
+    })
+}
+
+/// ASCII case-insensitive substring test on raw path bytes (the upstream path match).
+fn path_contains(path: &str, needle: &str) -> bool {
+    !needle.is_empty()
+        && path
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+/// Upstream also accepted a filter word glued to more text at the very start of the query
+/// (`/rocketlauncher`, `/nox-dimmer`); that shortcut is kept for the original English words.
+fn query_starts_with_filter(query_lower: &str, words: &[&str]) -> bool {
+    words.iter().any(|word| {
+        query_lower
+            .strip_prefix('@')
+            .or_else(|| query_lower.strip_prefix('/'))
+            .is_some_and(|rest| rest.starts_with(word))
+    })
+}
+
+fn catalog_result(entry: &CatalogEntry, kind: &str, score: u16) -> SearchResult {
+    SearchResult {
+        path: entry.path.to_string(),
+        name: entry.name.to_string(),
+        kind: kind.to_string(),
+        score,
+        icon_data: None,
+    }
+}
+
+fn rocket_list(search_text: &str) -> Vec<SearchResult> {
+    let commands = ROCKET_COMMANDS.iter().map(|command| (&command.entry, command.list_score));
+    let system = ROCKET_LIST_SYSTEM_ENTRIES.iter().map(|(entry, score)| (entry, *score));
+    commands
+        .chain(system)
+        .filter(|(entry, _)| catalog_entry_matches(entry.name, entry.aliases, search_text))
+        .map(|(entry, score)| catalog_result(entry, "command", score))
+        .collect()
+}
+
+fn nox_list(search_text: &str) -> Vec<SearchResult> {
+    if !is_nox_installed() {
+        return vec![catalog_result(&NOX_INSTALL, "command", 200)];
+    }
+    NOX_COMMANDS
+        .iter()
+        .filter(|(entry, _)| catalog_entry_matches(entry.name, entry.aliases, search_text))
+        .map(|(entry, score)| catalog_result(entry, "command", *score))
+        .collect()
+}
+
+/// `typed` keeps the case of the query, because it may become a URL.
+fn web_list(search_text: &str, typed: &str) -> Vec<SearchResult> {
+    let mut results: Vec<SearchResult> = WEB_PRESETS
+        .iter()
+        .filter(|(entry, _)| catalog_entry_matches(entry.name, entry.aliases, search_text))
+        .map(|(entry, score)| catalog_result(entry, "website", *score))
+        .collect();
+
+    let typed_lower = typed.to_lowercase();
+    if !typed.is_empty() && (typed.contains('.') || typed_lower.starts_with("http")) {
+        let url = if typed_lower.starts_with("http://") || typed_lower.starts_with("https://") {
+            typed.to_string()
+        } else {
+            format!("https://{}", typed)
+        };
+        results.insert(
+            0,
+            SearchResult {
+                path: url,
+                name: format!("Apri {}", typed),
+                kind: "website".to_string(),
+                score: 300,
+                icon_data: None,
+            },
+        );
+    }
+
+    results
+}
+
+fn this_pc_result(score: u16) -> SearchResult {
+    SearchResult {
+        icon_data: get_file_icon_base64("C:\\Windows\\explorer.exe"),
+        ..catalog_result(&THIS_PC, "app", score)
+    }
+}
+
+fn this_pc_list(search_text: &str) -> Vec<SearchResult> {
+    let mut results = Vec::new();
+    if catalog_entry_matches(THIS_PC.name, THIS_PC.aliases, search_text) {
+        results.push(this_pc_result(2000));
+    }
+    if catalog_entry_matches(RECYCLE_BIN.name, RECYCLE_BIN.aliases, search_text) {
+        results.push(catalog_result(&RECYCLE_BIN, "app", 1950));
+    }
+    if let Ok(user_profile) = std::env::var("USERPROFILE") {
+        for folder in KNOWN_FOLDERS {
+            let path = format!("{}\\{}", user_profile, folder.dir);
+            if catalog_entry_matches(folder.name, folder.aliases, search_text) && Path::new(&path).exists() {
+                results.push(SearchResult {
+                    path,
+                    name: folder.name.to_string(),
+                    kind: "folder".to_string(),
+                    score: 1900,
+                    icon_data: None,
+                });
+            }
+        }
+    }
+    results
+}
+
+/// The Italian name of a user folder (`%USERPROFILE%\Pictures` is "Immagini" in Explorer).
+fn known_folder_name(path: &str, user_profile: &str) -> Option<&'static str> {
+    let relative = path.get(user_profile.len()..)?;
+    if !path.as_bytes()[..user_profile.len()].eq_ignore_ascii_case(user_profile.as_bytes()) {
+        return None;
+    }
+    let dir = relative.strip_prefix('\\')?;
+    KNOWN_FOLDERS
+        .iter()
+        .find(|folder| folder.dir.eq_ignore_ascii_case(dir))
+        .map(|folder| folder.name)
+}
 
 #[tauri::command]
 async fn search_files(query: String) -> Vec<SearchResult> {
     tauri::async_runtime::spawn_blocking(move || {
-    let index_data = FILE_INDEX.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let index_data = FILE_INDEX.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        search_index(&index_data, &query)
+    })
+    .await
+    .unwrap_or_default()
+}
+
+fn search_index(index_data: &FileIndexData, query: &str) -> Vec<SearchResult> {
     let index = &index_data.items;
     let arena = &index_data.arena;
     let query_trim = query.trim();
@@ -279,286 +772,65 @@ async fn search_files(query: String) -> Vec<SearchResult> {
     if query_trim.is_empty() {
         return vec![];
     }
+    let query_lower = query_trim.to_lowercase();
 
-    let parts: Vec<&str> = query_trim.split_whitespace().collect();
-    let mut filters = Vec::new();
+    let mut filters: Vec<FilterToken> = Vec::new();
     let mut search_terms = Vec::new();
 
-    for part in parts {
+    for part in query_trim.split_whitespace() {
         if (part.starts_with('@') || part.starts_with('/')) && part.len() > 1 {
-            filters.push(part.to_lowercase());
+            filters.push(classify_filter(&part[1..]));
         } else {
             search_terms.push(part);
         }
     }
 
-    let search_text = search_terms.join(" ").to_lowercase();
+    // `typed` keeps the case (URLs), `search_raw` is matched byte by byte against paths as
+    // upstream did, and `search_text` (accent-folded) against display names and aliases, which
+    // are folded when they are indexed.
+    let typed: String = search_terms.join(" ").replace(ALIAS_SEPARATOR, "");
+    let search_raw = typed.to_lowercase();
+    let search_text = fold_for_search(&search_raw);
+    let has_filter = |wanted: FilterToken| filters.contains(&wanted);
 
-    let has_tabs_filter = filters.iter().any(|f| {
-        let content = &f[1..];
-        content == "tabs" || content == "active" || content == "window" || content == "windows"
-    });
-
-    if has_tabs_filter
-        || query_trim.to_lowercase().starts_with("@tabs")
-        || query_trim.to_lowercase().starts_with("/tabs")
-        || query_trim.to_lowercase().starts_with("@active")
-        || query_trim.to_lowercase().starts_with("/active")
-    {
+    if has_filter(FilterToken::Tabs) || query_starts_with_filter(&query_lower, &["tabs", "active"]) {
         let mut active = get_active_windows();
         if !search_text.is_empty() {
-            active.retain(|res| res.name.to_lowercase().contains(&search_text));
+            active.retain(|res| fold_for_search(&res.name).contains(&search_text));
         }
         return active;
     }
 
-    let has_rocket_filter = filters.iter().any(|f| {
-        let content = &f[1..];
-        content == "rocket" || content == "settings"
-    });
-
-    if has_rocket_filter
-        || query_trim.to_lowercase().starts_with("@settings")
-        || query_trim.to_lowercase().starts_with("/settings")
-        || query_trim.to_lowercase().starts_with("@rocket")
-        || query_trim.to_lowercase().starts_with("/rocket")
-    {
-        let all_rocket_commands = vec![
-            ("rocket:help", "RocketLauncher: Help", 201u16),
-            ("rocket:settings", "RocketLauncher Settings", 200),
-            ("rocket:toggle_recents", "RocketLauncher: Toggle Recents", 199),
-            ("rocket:clear_recents", "RocketLauncher: Clear Recents", 198),
-            ("rocket:refresh", "RocketLauncher: Refresh Index", 195),
-            ("rocket:show_desktop", "Show Desktop", 194),
-            ("rocket:active_tabs", "Active Tabs", 193),
-            ("rocket:quit", "Quit RocketLauncher", 192),
-            ("rocket:close_window", "Close Active Tab/Window", 191),
-            ("rocket:request_shutdown", "Shutdown", 190),
-            ("rocket:media_play", "Media: Play/Pause", 189),
-            ("rocket:media_next", "Media: Next Track", 188),
-            ("rocket:media_prev", "Media: Previous Track", 187),
-            ("rocket:request_restart", "Restart", 180),
-            ("ms-settings:startupapps", "Startup Apps", 175),
-            ("ms-settings:appsfeatures", "Apps & Features (Uninstall)", 174),
-            ("ms-settings:sound", "Sound Settings (Volume)", 170),
-            ("ms-settings:display", "Display Settings (Brightness)", 160),
-            ("ms-settings:windowsupdate", "Windows Update", 150),
-        ];
-
-        let settings_results: Vec<SearchResult> = all_rocket_commands
-            .into_iter()
-            .filter(|(_, name, _)| {
-                if search_text.is_empty() {
-                    true
-                } else {
-                    name.to_lowercase().contains(&search_text)
-                }
-            })
-            .map(|(path, name, score)| SearchResult {
-                path: path.to_string(),
-                name: name.to_string(),
-                kind: "command".to_string(),
-                score,
-                icon_data: None,
-            })
-            .collect();
-
-        return settings_results;
+    if has_filter(FilterToken::Rocket) || query_starts_with_filter(&query_lower, &["settings", "rocket"]) {
+        return rocket_list(&search_text);
     }
 
-    let has_nox_filter = filters.iter().any(|f| {
-        let content = &f[1..];
-        content == "nox" || content == "nox-dimmer"
-    });
-
-    if has_nox_filter
-        || query_trim.to_lowercase().starts_with("@nox")
-        || query_trim.to_lowercase().starts_with("/nox")
-    {
-        let nox_installed = is_nox_installed();
-
-        if nox_installed {
-            let all_nox_commands = vec![
-                ("nox:open", "Nox: Open", 210u16),
-                ("nox:quit", "Nox: Quit", 200),
-                ("nox:hyper_toggle", "Nox: Toggle Hyper Mode", 199),
-                ("nox:brightness_up", "Nox: Increase Dimness (+10%)", 198),
-                ("nox:brightness_down", "Nox: Decrease Dimness (-10%)", 197),
-                ("nox:check_updates", "Nox: Check for Updates", 195),
-                ("nox:help", "Nox: Help (GitHub)", 194),
-            ];
-
-            let nox_results: Vec<SearchResult> = all_nox_commands
-                .into_iter()
-                .filter(|(_, name, _)| {
-                    if search_text.is_empty() {
-                        true
-                    } else {
-                        name.to_lowercase().contains(&search_text)
-                    }
-                })
-                .map(|(path, name, score)| SearchResult {
-                    path: path.to_string(),
-                    name: name.to_string(),
-                    kind: "command".to_string(),
-                    score,
-                    icon_data: None,
-                })
-                .collect();
-            
-            return nox_results;
-        } else {
-            return vec![SearchResult {
-                path: "nox:install".to_string(),
-                name: "Nox: Install Nox Dimmer".to_string(),
-                kind: "command".to_string(),
-                score: 200,
-                icon_data: None,
-            }];
-        }
+    if has_filter(FilterToken::Nox) || query_starts_with_filter(&query_lower, &["nox"]) {
+        return nox_list(&search_text);
     }
 
-    let has_web_filter = filters.iter().any(|f| {
-        let content = &f[1..];
-        content == "web" || content == "website" || content == "websites" || content == "site" || content == "sites" || content == "url"
-    });
+    // The private-mode chip alone (possibly with a web search engine) lists the websites.
+    let has_web_filter = has_filter(FilterToken::Web);
+    let has_private_only = has_filter(FilterToken::Private)
+        && filters
+            .iter()
+            .all(|filter| matches!(filter, FilterToken::Private | FilterToken::FrontendOnly));
 
-    let has_p_only = filters.iter().any(|f| &f[1..] == "p")
-        && !has_web_filter
-        && !filters.iter().any(|f| {
-            let c = &f[1..];
-            c == "rocket" || c == "settings" || c == "pc" || c == "thispc" || c == "computer"
-                || c == "tabs" || c == "active" || c == "window" || c == "windows"
-                || c == "app" || c == "apps" || c == "folder" || c == "folders"
-                || c == "file" || c == "files" || c == "drive" || c == "drives"
-                || c == "nox" || c == "nox-dimmer"
-        });
-
-    if has_web_filter
-        || has_p_only
-        || query_trim.to_lowercase().starts_with("@web")
-        || query_trim.to_lowercase().starts_with("/web")
-    {
-        let all_websites = vec![
-            ("https://www.google.com", "Google", 200u16),
-            ("https://www.youtube.com", "YouTube", 199),
-            ("https://claude.ai", "Claude", 198),
-            ("https://gemini.google.com", "Gemini", 197),
-            ("https://chatgpt.com", "ChatGPT", 196),
-            ("https://github.com", "GitHub", 195),
-            ("https://www.reddit.com", "Reddit", 194),
-            ("https://twitter.com", "X (Twitter)", 193),
-            ("https://www.instagram.com", "Instagram", 192),
-            ("https://www.linkedin.com", "LinkedIn", 191),
-            ("https://stackoverflow.com", "Stack Overflow", 190),
-            ("https://mail.google.com", "Gmail", 189),
-            ("https://drive.google.com", "Google Drive", 188),
-            ("https://www.notion.so", "Notion", 187),
-            ("https://discord.com", "Discord", 186),
-            ("https://open.spotify.com", "Spotify", 185),
-            ("https://www.amazon.com", "Amazon", 184),
-            ("https://www.wikipedia.org", "Wikipedia", 183),
-            ("https://github.com/leonardostagliano/RocketLauncher#readme", "RocketLauncher Docs", 182),
-            ("https://yashvardhang.dev", "YashvardhanG", 181),
-        ];
-
-        let mut web_results: Vec<SearchResult> = all_websites
-            .into_iter()
-            .filter(|(_, name, _)| {
-                if search_text.is_empty() {
-                    true
-                } else {
-                    name.to_lowercase().contains(&search_text)
-                }
-            })
-            .map(|(url, name, score)| SearchResult {
-                path: url.to_string(),
-                name: name.to_string(),
-                kind: "website".to_string(),
-                score,
-                icon_data: None,
-            })
-            .collect();
-
-        if !search_text.is_empty() && (search_text.contains('.') || search_text.starts_with("http")) {
-            let url = if search_text.starts_with("http://") || search_text.starts_with("https://") {
-                search_text.clone()
-            } else {
-                format!("https://{}", search_text)
-            };
-            web_results.insert(0, SearchResult {
-                path: url,
-                name: format!("Open {}", search_text),
-                kind: "website".to_string(),
-                score: 300,
-                icon_data: None,
-            });
-        }
-
-        return web_results;
+    if has_web_filter || has_private_only || query_starts_with_filter(&query_lower, &["web"]) {
+        return web_list(&search_text, &typed);
     }
 
-    let filters: Vec<String> = filters.into_iter().filter(|f| {
-        let content = &f[1..];
-        content != "p"
-    }).collect();
-
-    let has_pc_filter = filters.iter().any(|f| {
-        let content = &f[1..];
-        content == "pc" || content == "thispc" || content == "computer"
-    });
-
-    if has_pc_filter
-        || query_trim.to_lowercase().starts_with("@pc")
-        || query_trim.to_lowercase().starts_with("/pc")
-    {
-        let mut pc_results = Vec::new();
-        let this_pc_icon = get_file_icon_base64("C:\\Windows\\explorer.exe");
-        pc_results.push(SearchResult {
-            path: "cmd:explorer shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}".to_string(),
-            name: "This PC".to_string(),
-            kind: "app".to_string(),
-            score: 2000,
-            icon_data: this_pc_icon,
-        });
-
-        pc_results.push(SearchResult {
-            path: "cmd:explorer shell:RecycleBinFolder".to_string(),
-            name: "Recycle Bin".to_string(),
-            kind: "app".to_string(),
-            score: 1950,
-            icon_data: None,
-        });
-
-        if let Ok(up) = std::env::var("USERPROFILE") {
-            let targets = vec![
-                ("Downloads", format!("{}\\Downloads", up)),
-                ("Pictures", format!("{}\\Pictures", up)),
-                ("Documents", format!("{}\\Documents", up)),
-                ("Music", format!("{}\\Music", up)),
-                ("Videos", format!("{}\\Videos", up)),
-                ("Desktop", format!("{}\\Desktop", up)),
-            ];
-
-            for (name, path) in targets {
-                if std::path::Path::new(&path).exists() {
-                    pc_results.push(SearchResult {
-                        path: path.clone(),
-                        name: name.to_string(),
-                        kind: "folder".to_string(),
-                        score: 1900,
-                        icon_data: None,
-                    });
-                }
-            }
-        }
-
-        if !search_text.is_empty() {
-            pc_results.retain(|r| r.name.to_lowercase().contains(&search_text));
-        }
-
-        return pc_results;
+    // Running a command and web searches are rows built by the interface: the index has
+    // nothing to add to them.
+    if has_filter(FilterToken::FrontendOnly) {
+        return vec![];
     }
+
+    if has_filter(FilterToken::ThisPc) || query_starts_with_filter(&query_lower, &["pc"]) {
+        return this_pc_list(&search_text);
+    }
+
+    let user_profile = std::env::var("USERPROFILE").ok();
 
     let mut matching_indices: Vec<(usize, u16)> = index
         .iter()
@@ -567,61 +839,23 @@ async fn search_files(query: String) -> Vec<SearchResult> {
             let path = &arena[item.path_start as usize..(item.path_start + item.path_len as u32) as usize];
             let name_lower = &arena[item.name_lower_start as usize..(item.name_lower_start + item.name_lower_len as u32) as usize];
 
-            for filter in &filters {
-                let f_content = &filter[1..];
-                match f_content {
-                    "app" | "apps" | "application" | "applications" | "exe" | "lnk" => {
-                        let bytes = path.as_bytes();
-                        let is_exe = bytes.len() >= 4 && (bytes[bytes.len()-4..].eq_ignore_ascii_case(b".exe") || bytes[bytes.len()-4..].eq_ignore_ascii_case(b".lnk"));
-                        if item.kind != ItemKind::App && !is_exe {
-                            return None;
-                        }
-                    }
-                    "folder" | "folders" | "directory" | "directories" | "dir" | "dirs" => {
-                        if item.kind != ItemKind::Folder {
-                            return None;
-                        }
-                    }
-                    "file" | "files" => {
-                        if item.kind != ItemKind::File {
-                            return None;
-                        }
-                    }
-                    "drive" | "disk" | "drives" | "disks" => {
-                        if item.kind != ItemKind::Drive {
-                            return None;
-                        }
-                    }
-                    d if (d.len() == 1 && d.chars().next().unwrap().is_alphabetic())
-                        || (d.len() == 2 && d.ends_with(':')) =>
-                    {
-                        let drive_prefix = format!("{}:", d.chars().next().unwrap());
-                        let bytes = path.as_bytes();
-                        if !(bytes.len() >= 2 && bytes[0..2].eq_ignore_ascii_case(drive_prefix.as_bytes())) {
-                            return None;
-                        }
-                    }
-                    "setting" | "settings" | "config" | "setup" => {
-                        if item.kind != ItemKind::Command {
-                            return None;
-                        }
-                    }
-                    ext => {
-                        let ext_with_dot = format!(".{}", ext);
-                        let ext_bytes = ext_with_dot.as_bytes();
-                        let bytes = path.as_bytes();
-                        if !(bytes.len() >= ext_bytes.len() && bytes[bytes.len() - ext_bytes.len()..].eq_ignore_ascii_case(ext_bytes)) {
-                            return None;
-                        }
-                    }
-                }
+            if !passes_filters(&filters, item.kind, path) {
+                return None;
             }
 
-            if !search_text.is_empty() {
-                if !name_lower.contains(&search_text) && !path.as_bytes().windows(search_text.len()).any(|w| w.eq_ignore_ascii_case(search_text.as_bytes())) {
+            let name_quality = if search_text.is_empty() {
+                // Every item "starts with" an empty query (upstream gave all of them +20).
+                NameMatch::Prefix
+            } else if name_lower.contains(search_text.as_str()) {
+                name_match(name_lower, &search_text)
+            } else {
+                let path_hit = path_contains(path, &search_raw)
+                    || (search_text != search_raw && path_contains(path, &search_text));
+                if !path_hit {
                     return None;
                 }
-            }
+                NameMatch::None
+            };
 
             let mut score: u16 = 1;
 
@@ -632,36 +866,28 @@ async fn search_files(query: String) -> Vec<SearchResult> {
             }
 
             if path.starts_with("shell:") {
-                score -= 10;
+                score = score.saturating_sub(10);
             }
 
             if item.kind == ItemKind::Drive {
                 score += 80;
             }
 
-            if name_lower == search_text {
-                score += 50;
-            } else if name_lower.starts_with(&search_text) {
-                score += 20;
-            } else if name_lower.contains(&search_text) {
-                score += 10;
-            }
+            score += match name_quality {
+                NameMatch::Exact => 50,
+                NameMatch::Prefix => 20,
+                NameMatch::Contains => 10,
+                NameMatch::None => 0,
+            };
 
             if path.len() < 50 {
                 score += 5;
             }
 
             if item.kind == ItemKind::Folder {
-                if let Ok(up) = std::env::var("USERPROFILE") {
-                    let up_bytes = up.as_bytes();
-                    let path_bytes = path.as_bytes();
-                    if path_bytes.len() > up_bytes.len() && path_bytes[..up_bytes.len()].eq_ignore_ascii_case(up_bytes) {
-                        let rel = &path_bytes[up_bytes.len()..];
-                        if rel.eq_ignore_ascii_case(b"\\downloads") || rel.eq_ignore_ascii_case(b"\\pictures")
-                        || rel.eq_ignore_ascii_case(b"\\documents") || rel.eq_ignore_ascii_case(b"\\music")
-                        || rel.eq_ignore_ascii_case(b"\\videos") || rel.eq_ignore_ascii_case(b"\\desktop") {
-                            score += 1500;
-                        }
+                if let Some(up) = user_profile.as_deref() {
+                    if known_folder_name(path, up).is_some() {
+                        score += 1500;
                     }
                 }
             }
@@ -673,52 +899,68 @@ async fn search_files(query: String) -> Vec<SearchResult> {
     matching_indices.sort_by(|a, b| b.1.cmp(&a.1));
 
     let mut unique_results = Vec::new();
-    let mut seen_names = HashSet::new();
+    // Folded display names already shown, and user folders already added on top (by path).
+    let mut seen_names: HashSet<String> = HashSet::new();
+    let mut pinned_paths: HashSet<String> = HashSet::new();
 
-    let search_text_lower = search_terms.join(" ").to_lowercase();
-    if !search_text_lower.is_empty() {
-        if "this pc".contains(&search_text_lower) || "pc".contains(&search_text_lower) || search_text_lower == "my computer" {
-            let this_pc_icon = get_file_icon_base64("C:\\Windows\\explorer.exe");
-            unique_results.push(SearchResult {
-                path: "cmd:explorer shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}".to_string(),
-                name: "This PC".to_string(),
-                kind: "app".to_string(),
-                score: 2000,
-                icon_data: this_pc_icon,
-            });
-            seen_names.insert("This PC".to_string());
+    if !search_text.is_empty() {
+        if pinned_entry_matches(THIS_PC.name, THIS_PC.aliases, &search_text)
+            && passes_filters(&filters, ItemKind::App, THIS_PC.path)
+        {
+            unique_results.push(this_pc_result(2000));
+            seen_names.insert(fold_for_search(THIS_PC.name));
         }
 
-        if let Ok(up) = std::env::var("USERPROFILE") {
-            if "gallery".contains(&search_text_lower) {
-                let pics_path = format!("{}\\Pictures", up);
-                if std::path::Path::new(&pics_path).exists() {
+        if let Some(up) = user_profile.as_deref() {
+            let pinned_folders = std::iter::once((&GALLERY, 2000u16))
+                .chain(KNOWN_FOLDERS.iter().map(|folder| (folder, 1900u16)));
+            for (folder, score) in pinned_folders {
+                let path = format!("{}\\{}", up, folder.dir);
+                if pinned_entry_matches(folder.name, folder.aliases, &search_text)
+                    && passes_filters(&filters, ItemKind::Folder, &path)
+                    && Path::new(&path).exists()
+                {
+                    seen_names.insert(fold_for_search(folder.name));
+                    pinned_paths.insert(path.to_ascii_lowercase());
                     unique_results.push(SearchResult {
-                        path: pics_path.clone(),
-                        name: "Gallery".to_string(),
+                        path,
+                        name: folder.name.to_string(),
                         kind: "folder".to_string(),
-                        score: 2000,
+                        score,
                         icon_data: None,
                     });
-                    seen_names.insert("Gallery".to_string());
                 }
             }
         }
     }
 
+    // A built-in command and a Start-menu app with the same Italian name (Gestione attività,
+    // Pannello di controllo, Servizi, …) are the same tool: the Start-menu entry is kept, since
+    // it is what Windows itself launches and it carries the real icon.
+    let app_names: HashSet<String> = matching_indices
+        .iter()
+        .filter(|(idx, _)| index[*idx].kind == ItemKind::App)
+        .map(|(idx, _)| {
+            let item = &index[*idx];
+            fold_for_search(&arena[item.name_start as usize..(item.name_start + item.name_len as u32) as usize])
+        })
+        .collect();
+
     for (idx, score) in matching_indices {
         let item = &index[idx];
         let path = &arena[item.path_start as usize..(item.path_start + item.path_len as u32) as usize];
-        let name = &arena[item.name_start as usize..(item.name_start + item.name_len as u32) as usize];
+        let mut name = &arena[item.name_start as usize..(item.name_start + item.name_len as u32) as usize];
         let kind_str = item.kind.as_str();
 
-        if kind_str == "app" {
-            if !seen_names.contains(name) {
-                seen_names.insert(name.to_string());
+        match item.kind {
+            ItemKind::App => {
+                if !seen_names.insert(fold_for_search(name)) {
+                    continue;
+                }
 
                 let bytes = path.as_bytes();
                 let is_exec = bytes.len() >= 4 && (bytes[bytes.len()-4..].eq_ignore_ascii_case(b".exe") || bytes[bytes.len()-4..].eq_ignore_ascii_case(b".lnk"));
-                
+
                 let icon_data = if is_exec {
                     get_file_icon_base64(path)
                 } else {
@@ -733,20 +975,41 @@ async fn search_files(query: String) -> Vec<SearchResult> {
                     icon_data,
                 });
             }
-        } else {
-            let icon_data = None;
-            if kind_str == "folder" && score >= 1500 {
-                if seen_names.contains(name) { continue; }
-                seen_names.insert(name.to_string());
+            ItemKind::Command => {
+                let folded = fold_for_search(name);
+                if app_names.contains(&folded) || !seen_names.insert(folded) {
+                    continue;
+                }
+                unique_results.push(SearchResult {
+                    path: path.to_string(),
+                    name: name.to_string(),
+                    kind: kind_str.to_string(),
+                    score,
+                    icon_data: None,
+                });
             }
+            _ => {
+                if item.kind == ItemKind::Folder && score >= 1500 {
+                    if pinned_paths.contains(&path.to_ascii_lowercase()) {
+                        continue;
+                    }
+                    // User folders are indexed with their physical English name.
+                    if let Some(italian) = user_profile.as_deref().and_then(|up| known_folder_name(path, up)) {
+                        name = italian;
+                    }
+                    if !seen_names.insert(fold_for_search(name)) {
+                        continue;
+                    }
+                }
 
-            unique_results.push(SearchResult {
-                path: path.to_string(),
-                name: name.to_string(),
-                kind: kind_str.to_string(),
-                score,
-                icon_data,
-            });
+                unique_results.push(SearchResult {
+                    path: path.to_string(),
+                    name: name.to_string(),
+                    kind: kind_str.to_string(),
+                    score,
+                    icon_data: None,
+                });
+            }
         }
 
         if unique_results.len() >= 50 {
@@ -755,7 +1018,6 @@ async fn search_files(query: String) -> Vec<SearchResult> {
     }
 
     unique_results
-    }).await.unwrap_or_default()
 }
 
 #[tauri::command]
@@ -1087,17 +1349,18 @@ fn get_active_windows() -> Vec<SearchResult> {
         }
 
         for (i, (title, hwnd_val)) in raw_list.into_iter().enumerate() {
+            // The type is shown under the window title (the part after '|' in the path).
             let t_lower = title.to_lowercase();
-            let mut app_type = "Application";
+            let mut app_type = "Applicazione";
 
             if t_lower.ends_with("- google chrome") {
-                app_type = "Chrome Tab";
+                app_type = "Scheda di Chrome";
             } else if t_lower.ends_with("- brave") {
-                app_type = "Brave Tab";
+                app_type = "Scheda di Brave";
             } else if t_lower.ends_with("- microsoft edge") || t_lower.ends_with("- microsoft\u{200b} edge") {
-                app_type = "Edge Tab";
+                app_type = "Scheda di Edge";
             } else if t_lower.ends_with("- mozilla firefox") {
-                app_type = "Firefox Tab";
+                app_type = "Scheda di Firefox";
             } else if t_lower.ends_with("- visual studio code") {
                 app_type = "VS Code";
             } else if t_lower.contains("discord") {
@@ -1372,95 +1635,41 @@ fn scan_folder(path: &str, kind_override: Option<&str>, index: &mut Vec<IndexedI
                 }
             }
 
-            if path_str.len() > u16::MAX as usize || name.len() > u16::MAX as usize {
-                continue;
-            }
-
-            let path_start = arena.len() as u32;
-            arena.push_str(&path_str);
-            let path_len = path_str.len() as u16;
-
-            let name_start = arena.len() as u32;
-            arena.push_str(&name);
-            let name_len = name.len() as u16;
-
-            let name_lower_str = name.to_lowercase();
-            let name_lower_start = arena.len() as u32;
-            arena.push_str(&name_lower_str);
-            let name_lower_len = name_lower_str.len() as u16;
-
-            let item = IndexedItem {
-                path_start, path_len,
-                name_start, name_len,
-                name_lower_start, name_lower_len,
-                kind,
-            };
-
-            index.push(item);
+            push_index_item(index, arena, &path_str, &name, &fold_for_search(&name), kind);
         }
     }
 }
 
+/// Appends one item to the index. `key` is what queries are matched against: the folded name,
+/// followed by the folded aliases for built-in entries (see `search_key`). Items whose slices
+/// do not fit the u16 lengths of the cache format are skipped.
+fn push_index_item(index: &mut Vec<IndexedItem>, arena: &mut String, path: &str, name: &str, key: &str, kind: ItemKind) {
+    let limit = u16::MAX as usize;
+    if path.len() > limit || name.len() > limit || key.len() > limit {
+        return;
+    }
+
+    let path_start = arena.len() as u32;
+    arena.push_str(path);
+    let name_start = arena.len() as u32;
+    arena.push_str(name);
+    let name_lower_start = arena.len() as u32;
+    arena.push_str(key);
+
+    index.push(IndexedItem {
+        path_start,
+        path_len: path.len() as u16,
+        name_start,
+        name_len: name.len() as u16,
+        name_lower_start,
+        name_lower_len: key.len() as u16,
+        kind,
+    });
+}
+
 fn index_system_settings(index: &mut Vec<IndexedItem>, arena: &mut String) {
-    let settings = vec![
-        ("Startup Apps", "ms-settings:startupapps"),
-        ("Uninstall Program", "ms-settings:appsfeatures"),
-        ("Apps & Features", "ms-settings:appsfeatures"),
-        ("Installed Apps", "ms-settings:installed-apps"),
-        ("Windows Update", "ms-settings:windowsupdate"),
-        ("Display Settings", "ms-settings:display"),
-        ("Sound Settings", "ms-settings:sound"),
-        ("Bluetooth & other devices", "ms-settings:bluetooth"),
-        ("Wi-Fi Settings", "ms-settings:network-wifi"),
-        ("Personalization", "ms-settings:personalization"),
-        ("Taskbar Settings", "ms-settings:taskbar"),
-        ("Date & Time Settings", "ms-settings:dateandtime"),
-        ("Power & Sleep Settings", "ms-settings:powersleep"),
-        ("Storage Settings", "ms-settings:storagesense"),
-        ("Background Apps", "ms-settings:privacy-backgroundapps"),
-        ("Notifications & actions", "ms-settings:notifications"),
-        ("Default Apps", "ms-settings:defaultapps"),
-        ("Control Panel", "cmd:control"),
-        ("Uninstall Program (Classic)", "cmd:appwiz.cpl"),
-        ("Task Manager", "cmd:taskmgr"),
-        ("System Information", "cmd:msinfo32"),
-        ("Command Prompt", "cmd:cmd"),
-        ("PowerShell", "cmd:powershell"),
-        ("Registry Editor", "cmd:regedit"),
-        ("Environment Variables", "cmd:rundll32.exe sysdm.cpl,EditEnvironmentVariables"),
-        ("System Properties", "cmd:sysdm.cpl"),
-        ("Network Connections", "cmd:ncpa.cpl"),
-        ("Disk Management", "cmd:diskmgmt.msc"),
-        ("Device Manager", "cmd:devmgmt.msc"),
-        ("Services", "cmd:services.msc"),
-        ("Group Policy Editor", "cmd:gpedit.msc"),
-        ("Resource Monitor", "cmd:resmon"),
-        ("Event Viewer", "cmd:eventvwr.msc"),
-    ];
-
-    for (name_str, path_str) in settings {
-        if path_str.len() > u16::MAX as usize || name_str.len() > u16::MAX as usize {
-            continue;
-        }
-        let path_start = arena.len() as u32;
-        arena.push_str(path_str);
-        let path_len = path_str.len() as u16;
-
-        let name_start = arena.len() as u32;
-        arena.push_str(name_str);
-        let name_len = name_str.len() as u16;
-
-        let name_lower_str = name_str.to_lowercase();
-        let name_lower_start = arena.len() as u32;
-        arena.push_str(&name_lower_str);
-        let name_lower_len = name_lower_str.len() as u16;
-
-        index.push(IndexedItem {
-            path_start, path_len,
-            name_start, name_len,
-            name_lower_start, name_lower_len,
-            kind: ItemKind::Command,
-        });
+    for entry in SYSTEM_ENTRIES {
+        push_index_item(index, arena, entry.path, entry.name, &search_key(entry.name, entry.aliases), ItemKind::Command);
     }
 }
 
@@ -1499,30 +1708,8 @@ fn index_windows_apps(index: &mut Vec<IndexedItem>, arena: &mut String) {
                     } else {
                         format!("shell:AppsFolder\\{}", app_id)
                     };
-                    
-                    if path.len() > u16::MAX as usize || name.len() > u16::MAX as usize {
-                        continue;
-                    }
 
-                    let path_start = arena.len() as u32;
-                    arena.push_str(&path);
-                    let path_len = path.len() as u16;
-
-                    let name_start = arena.len() as u32;
-                    arena.push_str(name);
-                    let name_len = name.len() as u16;
-
-                    let name_lower_str = name.to_lowercase();
-                    let name_lower_start = arena.len() as u32;
-                    arena.push_str(&name_lower_str);
-                    let name_lower_len = name_lower_str.len() as u16;
-
-                    index.push(IndexedItem {
-                        path_start, path_len,
-                        name_start, name_len,
-                        name_lower_start, name_lower_len,
-                        kind: ItemKind::App,
-                    });
+                    push_index_item(index, arena, &path, name, &fold_for_search(name), ItemKind::App);
                 }
             }
         }
@@ -1530,44 +1717,9 @@ fn index_windows_apps(index: &mut Vec<IndexedItem>, arena: &mut String) {
 }
 
 fn index_rocket_commands(index: &mut Vec<IndexedItem>, arena: &mut String) {
-    let rocket_commands = vec![
-        ("RocketLauncher: Help", "rocket:help"),
-        ("RocketLauncher Settings", "rocket:settings"),
-        ("RocketLauncher: Toggle Recents", "rocket:toggle_recents"),
-        ("RocketLauncher: Clear Recents", "rocket:clear_recents"),
-        ("RocketLauncher: Refresh Index", "rocket:refresh"),
-        ("Show Desktop", "rocket:show_desktop"),
-        ("Active Tabs", "rocket:active_tabs"),
-        ("Shutdown", "rocket:request_shutdown"),
-        ("Media: Play/Pause", "rocket:media_play"),
-        ("Media: Next Track", "rocket:media_next"),
-        ("Media: Previous Track", "rocket:media_prev"),
-        ("Restart", "rocket:request_restart"),
-    ];
-
-    for (name_str, path_str) in rocket_commands {
-        if path_str.len() > u16::MAX as usize || name_str.len() > u16::MAX as usize {
-            continue;
-        }
-        let path_start = arena.len() as u32;
-        arena.push_str(path_str);
-        let path_len = path_str.len() as u16;
-
-        let name_start = arena.len() as u32;
-        arena.push_str(name_str);
-        let name_len = name_str.len() as u16;
-
-        let name_lower_str = name_str.to_lowercase();
-        let name_lower_start = arena.len() as u32;
-        arena.push_str(&name_lower_str);
-        let name_lower_len = name_lower_str.len() as u16;
-
-        index.push(IndexedItem {
-            path_start, path_len,
-            name_start, name_len,
-            name_lower_start, name_lower_len,
-            kind: ItemKind::Command,
-        });
+    for command in ROCKET_COMMANDS.iter().filter(|command| command.indexed) {
+        let entry = &command.entry;
+        push_index_item(index, arena, entry.path, entry.name, &search_key(entry.name, entry.aliases), ItemKind::Command);
     }
 }
 
@@ -1643,26 +1795,7 @@ fn build_index_internal(app: &tauri::AppHandle, silent: bool) {
     for drive in drives {
         println!("Scanning drive: {}", drive);
 
-        let path_start = new_arena.len() as u32;
-        new_arena.push_str(&drive);
-        let path_len = drive.len() as u16;
-
-        let name_start = new_arena.len() as u32;
-        new_arena.push_str(&drive);
-        let name_len = drive.len() as u16;
-
-        let drive_lower = drive.to_lowercase();
-        let name_lower_start = new_arena.len() as u32;
-        new_arena.push_str(&drive_lower);
-        let name_lower_len = drive_lower.len() as u16;
-
-        let drive_root = IndexedItem {
-            path_start, path_len,
-            name_start, name_len,
-            name_lower_start, name_lower_len,
-            kind: ItemKind::Drive,
-        };
-        new_items.push(drive_root);
+        push_index_item(&mut new_items, &mut new_arena, &drive, &drive, &fold_for_search(&drive), ItemKind::Drive);
 
         scan_folder(&drive, None, &mut new_items, &mut new_arena);
     }
@@ -1833,8 +1966,8 @@ fn main() {
                 }
             });
 
-            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let show_i = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
+            let quit_i = MenuItem::with_id(app, "quit", "Esci", true, None::<&str>)?;
+            let show_i = MenuItem::with_id(app, "show", "Mostra RocketLauncher", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
 
             let icon_bytes = include_bytes!("../icons/icon_32x32.png");
@@ -1903,4 +2036,263 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An index holding the built-in entries plus `extra` (path, name, kind) items.
+    fn index_with(extra: &[(&str, &str, ItemKind)]) -> FileIndexData {
+        let mut items = Vec::new();
+        let mut arena = String::new();
+        index_system_settings(&mut items, &mut arena);
+        index_rocket_commands(&mut items, &mut arena);
+        for (path, name, kind) in extra {
+            push_index_item(&mut items, &mut arena, path, name, &fold_for_search(name), *kind);
+        }
+        FileIndexData { items, arena }
+    }
+
+    fn paths(results: &[SearchResult]) -> Vec<&str> {
+        results.iter().map(|result| result.path.as_str()).collect()
+    }
+
+    #[test]
+    fn folding_lowercases_and_removes_accents() {
+        assert_eq!(fold_for_search("Gestione attività"), "gestione attivita");
+        assert_eq!(fold_for_search("PERCHÉ è così"), "perche e cosi");
+        assert_eq!(fold_for_search("Unità C:\\"), "unita c:\\");
+        assert_eq!(fold_for_search("Variabili d\u{2019}ambiente"), "variabili d'ambiente");
+        assert_eq!(fold_for_search("Plain ASCII.txt"), "plain ascii.txt");
+    }
+
+    #[test]
+    fn search_key_puts_the_display_name_first_and_skips_repeated_aliases() {
+        assert_eq!(
+            search_key("Windows Update", &["windows update", "Aggiornamenti"]),
+            "windows update\u{1F}aggiornamenti"
+        );
+        assert_eq!(search_key("Luminosità", &[]), "luminosita");
+    }
+
+    #[test]
+    fn each_alias_is_matched_on_its_own() {
+        let key = search_key("Arresta il sistema", &["Shutdown", "spegni il pc"]);
+        assert_eq!(name_match(&key, "shutdown"), NameMatch::Exact);
+        assert_eq!(name_match(&key, "arresta il sistema"), NameMatch::Exact);
+        assert_eq!(name_match(&key, "spe"), NameMatch::Prefix);
+        assert_eq!(name_match(&key, "sistema"), NameMatch::Contains);
+        assert_eq!(name_match(&key, "riavvia"), NameMatch::None);
+        // The separator never lets a query span two aliases.
+        assert_eq!(name_match(&key, "sistema shutdown"), NameMatch::None);
+    }
+
+    #[test]
+    fn every_upstream_english_name_is_still_an_exact_alias() {
+        let system_names = [
+            "Startup Apps", "Uninstall Program", "Apps & Features", "Installed Apps", "Windows Update",
+            "Display Settings", "Sound Settings", "Bluetooth & other devices", "Wi-Fi Settings",
+            "Personalization", "Taskbar Settings", "Date & Time Settings", "Power & Sleep Settings",
+            "Storage Settings", "Background Apps", "Notifications & actions", "Default Apps", "Control Panel",
+            "Uninstall Program (Classic)", "Task Manager", "System Information", "Command Prompt", "PowerShell",
+            "Registry Editor", "Environment Variables", "System Properties", "Network Connections",
+            "Disk Management", "Device Manager", "Services", "Group Policy Editor", "Resource Monitor",
+            "Event Viewer",
+        ];
+        for english in system_names {
+            let query = fold_for_search(english);
+            assert!(
+                SYSTEM_ENTRIES
+                    .iter()
+                    .any(|entry| name_match(&search_key(entry.name, entry.aliases), &query) == NameMatch::Exact),
+                "no system entry answers to {english:?}"
+            );
+        }
+
+        let command_names = [
+            "RocketLauncher: Help", "RocketLauncher Settings", "RocketLauncher: Toggle Recents",
+            "RocketLauncher: Clear Recents", "RocketLauncher: Refresh Index", "Show Desktop", "Active Tabs",
+            "Quit RocketLauncher", "Close Active Tab/Window", "Shutdown", "Media: Play/Pause", "Media: Next Track",
+            "Media: Previous Track", "Restart",
+        ];
+        for english in command_names {
+            let query = fold_for_search(english);
+            assert!(
+                ROCKET_COMMANDS.iter().any(|command| {
+                    name_match(&search_key(command.entry.name, command.entry.aliases), &query) == NameMatch::Exact
+                }),
+                "no RocketLauncher command answers to {english:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn general_search_finds_italian_names_with_or_without_accents_and_english_aliases() {
+        let index = index_with(&[]);
+
+        for query in ["attivita", "attività", "Gestione Attività", "task manager", "taskmgr"] {
+            let results = search_index(&index, query);
+            assert_eq!(results.first().map(|r| r.path.as_str()), Some("cmd:taskmgr"), "query {query:?}");
+            assert_eq!(results[0].name, "Gestione attività");
+        }
+
+        let results = search_index(&index, "shutdown");
+        assert_eq!(results[0].path, "rocket:request_shutdown");
+        assert_eq!(results[0].name, "Arresta il sistema");
+        assert!(paths(&search_index(&index, "spegni")).contains(&"rocket:request_shutdown"));
+        assert!(paths(&search_index(&index, "luminosita")).contains(&"ms-settings:display"));
+    }
+
+    #[test]
+    fn exact_alias_outranks_a_prefix_match() {
+        let index = index_with(&[]);
+        let results = search_index(&index, "disinstalla");
+        assert_eq!(results[0].name, "Disinstalla un programma");
+        assert!(paths(&results).contains(&"cmd:appwiz.cpl"));
+    }
+
+    #[test]
+    fn a_start_menu_app_replaces_the_built_in_command_with_the_same_name() {
+        let app_path = "shell:AppsFolder\\Microsoft.AutoGenerated.{10D58619}";
+        let index = index_with(&[(app_path, "Gestione attività", ItemKind::App)]);
+
+        assert_eq!(paths(&search_index(&index, "gestione attivita")), vec![app_path]);
+        // The English alias only matches the command, which therefore stays.
+        assert_eq!(paths(&search_index(&index, "task manager")), vec!["cmd:taskmgr"]);
+    }
+
+    #[test]
+    fn italian_filter_words_are_categories_not_extensions() {
+        assert_eq!(classify_filter("cartelle"), FilterToken::Folders);
+        assert_eq!(classify_filter("cartella"), FilterToken::Folders);
+        assert_eq!(classify_filter("applicazioni"), FilterToken::Apps);
+        assert_eq!(classify_filter("programmi"), FilterToken::Apps);
+        assert_eq!(classify_filter("unità"), FilterToken::Drives);
+        assert_eq!(classify_filter("UNITA"), FilterToken::Drives);
+        assert_eq!(classify_filter("dischi"), FilterToken::Drives);
+        assert_eq!(classify_filter("finestre"), FilterToken::Tabs);
+        assert_eq!(classify_filter("schede"), FilterToken::Tabs);
+        assert_eq!(classify_filter("impostazioni"), FilterToken::Rocket);
+        assert_eq!(classify_filter("comandi"), FilterToken::Rocket);
+        assert_eq!(classify_filter("siti"), FilterToken::Web);
+        assert_eq!(classify_filter("questopc"), FilterToken::ThisPc);
+        assert_eq!(classify_filter("privato"), FilterToken::Private);
+        assert_eq!(classify_filter("incognito"), FilterToken::Private);
+        assert_eq!(classify_filter("esegui"), FilterToken::FrontendOnly);
+        assert_eq!(classify_filter("cerca"), FilterToken::FrontendOnly);
+        assert_eq!(classify_filter("configurazione"), FilterToken::Commands);
+    }
+
+    #[test]
+    fn english_filters_drive_letters_and_extensions_keep_working() {
+        assert_eq!(classify_filter("folders"), FilterToken::Folders);
+        assert_eq!(classify_filter("apps"), FilterToken::Apps);
+        assert_eq!(classify_filter("tabs"), FilterToken::Tabs);
+        assert_eq!(classify_filter("settings"), FilterToken::Rocket);
+        assert_eq!(classify_filter("rocket"), FilterToken::Rocket);
+        assert_eq!(classify_filter("web"), FilterToken::Web);
+        assert_eq!(classify_filter("pc"), FilterToken::ThisPc);
+        assert_eq!(classify_filter("p"), FilterToken::Private);
+        assert_eq!(classify_filter("config"), FilterToken::Commands);
+        assert_eq!(classify_filter("google"), FilterToken::FrontendOnly);
+        assert_eq!(classify_filter("c"), FilterToken::DriveLetter('c'));
+        assert_eq!(classify_filter("D:"), FilterToken::DriveLetter('d'));
+        assert_eq!(classify_filter("pdf"), FilterToken::Extension("pdf".to_string()));
+        assert_eq!(classify_filter("velo"), FilterToken::Extension("velo".to_string()));
+    }
+
+    #[test]
+    fn filters_keep_kinds_drives_and_extensions() {
+        assert!(passes_filters(&[FilterToken::Folders], ItemKind::Folder, "C:\\Progetti"));
+        assert!(!passes_filters(&[FilterToken::Folders], ItemKind::File, "C:\\Progetti.txt"));
+        assert!(passes_filters(&[FilterToken::Apps], ItemKind::File, "C:\\Tools\\tool.EXE"));
+        assert!(passes_filters(&[FilterToken::DriveLetter('c')], ItemKind::File, "c:\\a.txt"));
+        assert!(!passes_filters(&[FilterToken::DriveLetter('c')], ItemKind::File, "D:\\a.txt"));
+        let pdf = [FilterToken::Extension("pdf".to_string())];
+        assert!(passes_filters(&pdf, ItemKind::File, "C:\\Documenti\\Relazione.PDF"));
+        assert!(!passes_filters(&pdf, ItemKind::File, "C:\\Documenti\\pdf"));
+        assert!(!passes_filters(&pdf, ItemKind::File, "C:\\Documenti\\a.xpdf"));
+        assert!(passes_filters(&[FilterToken::Private, FilterToken::FrontendOnly], ItemKind::File, "C:\\a"));
+    }
+
+    #[test]
+    fn italian_filter_chips_limit_the_general_search() {
+        let index = index_with(&[
+            ("C:\\Progetti", "Progetti", ItemKind::Folder),
+            ("C:\\Note\\Progetti.txt", "Progetti.txt", ItemKind::File),
+        ]);
+        assert_eq!(paths(&search_index(&index, "/cartelle progetti")), vec!["C:\\Progetti"]);
+        assert_eq!(paths(&search_index(&index, "@file progetti")), vec!["C:\\Note\\Progetti.txt"]);
+        assert_eq!(paths(&search_index(&index, "/txt progetti")), vec!["C:\\Note\\Progetti.txt"]);
+    }
+
+    #[test]
+    fn rocket_list_answers_to_italian_and_english_words() {
+        let empty = FileIndexData::default();
+        assert_eq!(paths(&search_index(&empty, "/rocket spegni")), vec!["rocket:request_shutdown"]);
+        assert_eq!(paths(&search_index(&empty, "/impostazioni restart")), vec!["rocket:request_restart"]);
+        assert_eq!(paths(&search_index(&empty, "/comandi luminosita")), vec!["ms-settings:display"]);
+        assert_eq!(paths(&search_index(&empty, "/settings quit")), vec!["rocket:quit"]);
+        assert_eq!(
+            search_index(&empty, "/rocket").len(),
+            ROCKET_COMMANDS.len() + ROCKET_LIST_SYSTEM_ENTRIES.len()
+        );
+    }
+
+    #[test]
+    fn web_list_uses_italian_editions_and_opens_typed_urls() {
+        let empty = FileIndexData::default();
+        assert_eq!(paths(&search_index(&empty, "/web wiki")), vec!["https://it.wikipedia.org"]);
+        assert_eq!(paths(&search_index(&empty, "/siti amazon")), vec!["https://www.amazon.it"]);
+
+        let typed = search_index(&empty, "/sito Example.com/Pagina");
+        assert_eq!(typed[0].path, "https://Example.com/Pagina");
+        assert_eq!(typed[0].name, "Apri Example.com/Pagina");
+    }
+
+    #[test]
+    fn private_mode_alone_lists_the_websites() {
+        let empty = FileIndexData::default();
+        assert_eq!(search_index(&empty, "/p").len(), WEB_PRESETS.len());
+        assert_eq!(search_index(&empty, "@privato").len(), WEB_PRESETS.len());
+        assert_eq!(search_index(&empty, "/p /google").len(), WEB_PRESETS.len());
+    }
+
+    #[test]
+    fn interface_only_filters_add_nothing_from_the_index() {
+        let index = index_with(&[]);
+        assert!(search_index(&index, "/google gestione").is_empty());
+        assert!(search_index(&index, "/esegui dir").is_empty());
+    }
+
+    #[test]
+    fn pinned_rows_need_two_letters_starting_a_word() {
+        assert!(pinned_entry_matches(THIS_PC.name, THIS_PC.aliases, "pc"));
+        assert!(pinned_entry_matches(THIS_PC.name, THIS_PC.aliases, "questo"));
+        assert!(pinned_entry_matches(THIS_PC.name, THIS_PC.aliases, "this"));
+        assert!(pinned_entry_matches(THIS_PC.name, THIS_PC.aliases, "comp"));
+        assert!(!pinned_entry_matches(THIS_PC.name, THIS_PC.aliases, "t"));
+        assert!(!pinned_entry_matches(THIS_PC.name, THIS_PC.aliases, "is"));
+        assert!(!pinned_entry_matches(THIS_PC.name, THIS_PC.aliases, "sto"));
+        assert!(pinned_entry_matches(GALLERY.name, GALLERY.aliases, "gal"));
+        assert!(!pinned_entry_matches(GALLERY.name, GALLERY.aliases, "a"));
+        assert!(!pinned_entry_matches(GALLERY.name, GALLERY.aliases, "le"));
+    }
+
+    #[test]
+    fn user_folders_get_their_italian_names() {
+        assert_eq!(known_folder_name("C:\\Users\\Ada\\Pictures", "C:\\Users\\Ada"), Some("Immagini"));
+        assert_eq!(known_folder_name("c:\\users\\ada\\downloads", "C:\\Users\\Ada"), Some("Download"));
+        assert_eq!(known_folder_name("C:\\Users\\Ada\\Pictures\\2024", "C:\\Users\\Ada"), None);
+        assert_eq!(known_folder_name("C:\\Users\\Bob\\Music", "C:\\Users\\Ada"), None);
+        assert_eq!(known_folder_name("C:\\Users\\Ada", "C:\\Users\\Ada"), None);
+    }
+
+    #[test]
+    fn glued_english_filter_words_keep_their_upstream_shortcut() {
+        assert!(query_starts_with_filter("/rocketlauncher", &["rocket"]));
+        assert!(query_starts_with_filter("@nox-dimmer", &["nox"]));
+        assert!(!query_starts_with_filter("rocket", &["rocket"]));
+        assert!(!query_starts_with_filter("/web", &["tabs"]));
+    }
 }

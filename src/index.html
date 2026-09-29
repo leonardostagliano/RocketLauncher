@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="it">
 
 <head>
   <meta charset="UTF-8" />
@@ -14,47 +14,51 @@
   <div id="container">
     <div class="header" data-tauri-drag-region>
       <div class="logo-area" data-tauri-drag-region>
-        <img src="assets/logo.svg" alt="Logo" class="app-logo" />
+        <img src="assets/logo.svg" alt="RocketLauncher" class="app-logo" />
       </div>
 
       <div class="search-wrapper" id="search-wrapper">
         <div id="chips-area" class="chips-area"></div>
-        <input type="text" id="search-input" placeholder="⚡RocketLauncher running..." autofocus autocomplete="off" />
+        <input type="text" id="search-input" placeholder="Cerca app, file, cartelle e comandi" autofocus
+          autocomplete="off" spellcheck="false" aria-label="Cerca" />
       </div>
 
-      <div class="settings-icon" id="settings-btn">⚙️</div>
+      <div class="settings-icon" id="settings-btn" role="button" title="Impostazioni (Tab)" aria-label="Impostazioni">⚙️</div>
     </div>
 
-    <div id="settings-panel" class="settings-panel hidden">
+    <div id="settings-panel" class="settings-panel hidden" aria-label="Impostazioni">
       <div class="settings-row">
-        <label class="toggle-switch-container">
+        <label class="toggle-switch-container" title="Mostra gli elementi aperti di recente quando la ricerca è vuota">
           <input type="checkbox" id="show-recents-toggle">
           <span class="slider"></span>
-          <span class="label-text">Recents</span>
+          <span class="label-text">Mostra i recenti</span>
         </label>
-        <label class="toggle-switch-container">
+        <label class="toggle-switch-container" title="Avvia RocketLauncher all'accesso a Windows">
           <input type="checkbox" id="startup-toggle" checked>
           <span class="slider"></span>
-          <span class="label-text">Run at Startup</span>
+          <span class="label-text">Avvia con Windows</span>
         </label>
-        <button id="clear-recents-btn" class="btn btn-danger btn-sm">Clear Recents</button>
-        <button id="reset-pos-btn" class="btn btn-secondary btn-sm">Reset Settings</button>
+        <button id="clear-recents-btn" class="btn btn-danger btn-sm">Svuota recenti</button>
+        <button id="reset-pos-btn" class="btn btn-secondary btn-sm"
+          title="Riporta recenti, avvio con Windows, modalità statistiche e scelta rapida ai valori predefiniti">Ripristina impostazioni</button>
       </div>
 
       <div class="settings-row">
-        <label class="setting-label no-margin">Global Shortcut</label>
+        <label class="setting-label no-margin">Scelta rapida</label>
         <div class="relative">
-          <div id="shortcut-display" class="shortcut-display">Loading...</div>
-          <div id="shortcut-dropdown" class="shortcut-dropdown hidden"></div>
+          <div id="shortcut-display" class="shortcut-display" role="button" aria-haspopup="listbox"
+            title="Combinazione di tasti che mostra o nasconde RocketLauncher">Caricamento…</div>
+          <div id="shortcut-dropdown" class="shortcut-dropdown hidden" aria-label="Scelte rapide disponibili"></div>
         </div>
-        <div id="shortcut-msg" class="shortcut-msg margin-left-10"></div>
-        <button id="update-btn" class="btn btn-secondary btn-sm margin-left-auto">Check for Updates</button>
+        <div id="shortcut-msg" class="shortcut-msg margin-left-10" aria-live="polite"></div>
+        <button id="update-btn" class="btn btn-secondary btn-sm margin-left-auto">Controlla aggiornamenti</button>
       </div>
 
       <div class="settings-footer">
-        <button id="help-btn" class="info-btn" title="Help & Documentation">ℹ</button>
-        <label class="toggle-switch-container margin-left-auto no-margin-right toggle-red">
-          <span class="label-text" style="margin-right: 10px;">Stat Mode</span>
+        <button id="help-btn" class="info-btn" title="Guida e documentazione" aria-label="Guida">ℹ</button>
+        <label class="toggle-switch-container margin-left-auto no-margin-right toggle-red"
+          title="Mostra la RAM usata da RocketLauncher nel piè di pagina">
+          <span class="label-text" style="margin-right: 10px;">Modalità statistiche</span>
           <input type="checkbox" id="analytics-toggle">
           <span class="slider"></span>
         </label>
@@ -62,13 +66,13 @@
     </div>
 
     <div id="results-container">
-      <ul id="results"></ul>
+      <ul id="results" aria-label="Risultati"></ul>
     </div>
 
     <div class="footer">
-      <div id="memory-usage" class="memory-stats hidden">RAM: 0MB</div>
-      <div class="credits">Made with <span style="color: #e25555;">&lt;3</span> - <a
-          href="https://github.com/YashvardhanG/Velocmd" target="_blank">Yashvardhan Gupta</a></div>
+      <div id="memory-usage" class="memory-stats hidden">RAM: 0,0 MB</div>
+      <div class="credits">Basato su <a href="https://github.com/YashvardhanG/Velocmd" target="_blank"
+          title="Velocmd di Yashvardhan Gupta, licenza GPL-3.0">Velocmd</a> di Yashvardhan Gupta</div>
     </div>
   </div>
   <script src="main.js" type="module"></script>
