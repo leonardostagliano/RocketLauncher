@@ -1,3 +1,4 @@
+import { HELP_URL, LATEST_RELEASE_URL, findUpdate } from "./update-source.js";
 const { invoke } = window.__TAURI__.core;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { listen } = window.__TAURI__.event;
@@ -255,9 +256,20 @@ function setPlaceholder(key) {
 }
 setPlaceholder("default");
 
-const CURRENT_VERSION = "0.1.8";
+// Installed version as built into the app: tauri.conf.json points at package.json and CI overrides it with
+// `tauri build --config`, so it is the same value as the exe VERSIONINFO, the NSIS setup and the MSI.
+// Needs core:app:allow-version, which core:default already grants.
+const appVersion = window.__TAURI__.app.getVersion().catch((err) => {
+  console.error("App version unavailable:", err);
+  return null;
+});
 let isUpdateAvailable = false;
-let latestReleaseUrl = "https://github.com/leonardostagliano/RocketLauncher/releases/latest";
+let latestReleaseUrl = LATEST_RELEASE_URL;
+
+const appVersionLabel = document.getElementById("app-version");
+appVersion.then((version) => {
+  if (appVersionLabel && version) appVersionLabel.textContent = `Versione ${version}`;
+});
 
 let settingsIndex = -1;
 let dropdownIndex = -1;
@@ -543,58 +555,47 @@ resetPosBtn.onclick = async () => {
   lastWindowHeight = WINDOW_MAX_HEIGHT;
 };
 
+function setUpdateButton(text, variant) {
+  if (!updateBtn) return;
+  updateBtn.textContent = text;
+  updateBtn.classList.remove("btn-secondary", "btn-success", "btn-update-available");
+  updateBtn.classList.add(variant);
+}
+
+function resetUpdateButtonLater() {
+  setTimeout(() => setUpdateButton(UPDATE_LABELS.idle, "btn-secondary"), 3000);
+}
+
+// The newest published release when it is strictly newer than the installed version, otherwise null.
+// No release yet (GitHub answers 404) counts as up to date, not as a failure.
+async function refreshUpdateState() {
+  const update = await findUpdate(await appVersion);
+  isUpdateAvailable = Boolean(update);
+  if (update) latestReleaseUrl = update.url;
+  return update;
+}
+
 async function checkUpdates(isAuto = false) {
+  if (!isAuto) setUpdateButton(UPDATE_LABELS.checking, "btn-secondary");
   try {
-    if (!isAuto && updateBtn) {
-      updateBtn.textContent = UPDATE_LABELS.checking;
-      updateBtn.classList.remove("btn-success", "btn-update-available");
-      updateBtn.classList.add("btn-secondary");
-    }
-
-    const response = await fetch("https://api.github.com/repos/leonardostagliano/RocketLauncher/releases/latest");
-    const data = await response.json();
-
-    // No published release yet (404) or a rate-limit answer: report it instead of leaving
-    // the button on "Verifica in corso…".
-    if (!response.ok || !data.tag_name) throw new Error(`No release information (HTTP ${response.status})`);
-
-    latestReleaseUrl = data.html_url;
-
-    const latestVersion = data.tag_name.replace("v", "");
-
-    if (latestVersion !== CURRENT_VERSION) {
-      isUpdateAvailable = true;
+    const update = await refreshUpdateState();
+    if (update) {
+      setUpdateButton(UPDATE_LABELS.available(update.version), "btn-update-available");
       if (isAuto && placeholderKey === "default") {
         setPlaceholder("update");
         setTimeout(() => {
           if (placeholderKey === "update") setPlaceholder("default");
         }, 2500);
       }
-
-      if (updateBtn) {
-        updateBtn.textContent = UPDATE_LABELS.available(latestVersion);
-        updateBtn.classList.remove("btn-secondary", "btn-success");
-        updateBtn.classList.add("btn-update-available");
-      }
-    } else {
-      if (!isAuto && updateBtn) {
-        updateBtn.textContent = UPDATE_LABELS.upToDate;
-        updateBtn.classList.remove("btn-secondary");
-        updateBtn.classList.add("btn-success");
-        setTimeout(() => {
-          updateBtn.textContent = UPDATE_LABELS.idle;
-          updateBtn.classList.remove("btn-success");
-          updateBtn.classList.add("btn-secondary");
-        }, 3000);
-      }
+    } else if (!isAuto) {
+      setUpdateButton(UPDATE_LABELS.upToDate, "btn-success");
+      resetUpdateButtonLater();
     }
   } catch (err) {
     console.error("Update check failed:", err);
-    if (!isAuto && updateBtn) {
-      updateBtn.textContent = UPDATE_LABELS.failed;
-      setTimeout(() => {
-        updateBtn.textContent = UPDATE_LABELS.idle;
-      }, 3000);
+    if (!isAuto) {
+      setUpdateButton(UPDATE_LABELS.failed, "btn-secondary");
+      resetUpdateButtonLater();
     }
   }
 }
@@ -602,35 +603,27 @@ async function checkUpdates(isAuto = false) {
 if (updateBtn) {
   updateBtn.onclick = async (e) => {
     e.stopPropagation();
-    if (isUpdateAvailable) {
-      const offeredLabel = updateBtn.textContent;
-      updateBtn.textContent = UPDATE_LABELS.checking;
-      try {
-        const response = await fetch("https://api.github.com/repos/leonardostagliano/RocketLauncher/releases/latest");
-        const data = await response.json();
-        const latestVersion = data.tag_name?.replace("v", "");
-
-        if (latestVersion && latestVersion !== CURRENT_VERSION) {
-          updateBtn.textContent = UPDATE_LABELS.available(latestVersion);
-          await invoke("open_file", { path: data.html_url });
-        } else {
-          isUpdateAvailable = false;
-          updateBtn.textContent = UPDATE_LABELS.upToDate;
-          updateBtn.classList.remove("btn-update-available");
-          updateBtn.classList.add("btn-success");
-          setTimeout(() => {
-            updateBtn.textContent = UPDATE_LABELS.idle;
-            updateBtn.classList.remove("btn-success");
-            updateBtn.classList.add("btn-secondary");
-          }, 3000);
-        }
-      } catch (err) {
-        updateBtn.textContent = offeredLabel;
-        await invoke("open_file", { path: latestReleaseUrl });
-      }
-    } else {
+    if (!isUpdateAvailable) {
       checkUpdates(false);
+      return;
     }
+    // Check again before opening the page: the release may have been withdrawn in the meantime.
+    const offeredLabel = updateBtn.textContent;
+    updateBtn.textContent = UPDATE_LABELS.checking;
+    try {
+      const update = await refreshUpdateState();
+      if (!update) {
+        setUpdateButton(UPDATE_LABELS.upToDate, "btn-success");
+        resetUpdateButtonLater();
+        return;
+      }
+      setUpdateButton(UPDATE_LABELS.available(update.version), "btn-update-available");
+    } catch (err) {
+      // Offline: open the last known release page, as Velocmd did.
+      console.error("Update re-check failed:", err);
+      updateBtn.textContent = offeredLabel;
+    }
+    await invoke("open_file", { path: latestReleaseUrl });
   };
 }
 
@@ -1057,7 +1050,7 @@ async function openFile(path, kind, name) {
   }
 
   if (path === "rocket:help") {
-    await invoke("open_file", { path: "https://github.com/leonardostagliano/RocketLauncher#readme" });
+    await invoke("open_file", { path: HELP_URL });
     input.value = "";
     state.results = [];
     render();
@@ -1839,7 +1832,7 @@ initAutostart();
 if (helpBtn) {
   helpBtn.onclick = async (e) => {
     e.stopPropagation();
-    await invoke("open_file", { path: "https://github.com/leonardostagliano/RocketLauncher#readme" });
+    await invoke("open_file", { path: HELP_URL });
   };
 }
 

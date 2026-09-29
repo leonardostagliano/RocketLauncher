@@ -1882,7 +1882,37 @@ fn get_indexing_state() -> bool {
     IS_INDEXING.load(Ordering::SeqCst)
 }
 
+/// Release check run by scripts/smoke-windows.ps1 as `RocketLauncher.exe --smoke=<version>`.
+/// Exit codes: 0 everything matches, 10 getVersion() differs, 11 a frontend asset is missing, 12 wrong product name.
+fn smoke_exit_code<R: tauri::Runtime>(context: &tauri::Context<R>, expected_version: &str) -> i32 {
+    if context.package_info().version.to_string() != expected_version {
+        return 10;
+    }
+    let assets = context.assets();
+    if ["index.html", "main.js", "update-source.js", "styles.css"]
+        .iter()
+        .any(|name| assets.get(&tauri::utils::assets::AssetKey::from(*name)).is_none())
+    {
+        return 11;
+    }
+    if context.config().product_name.as_deref() != Some("RocketLauncher") {
+        return 12;
+    }
+    0
+}
+
 fn main() {
+    let context = tauri::generate_context!();
+
+    // Release smoke test: compare the version getVersion() returns and the embedded assets, then exit before any
+    // plugin, window, tray, global shortcut, single-instance lock, autostart or indexing starts (no side effects).
+    if let Some(expected) = std::env::args_os()
+        .skip(1)
+        .find_map(|arg| arg.to_str()?.strip_prefix("--smoke=").map(str::to_owned))
+    {
+        std::process::exit(smoke_exit_code(&context, &expected));
+    }
+
     // start_periodic_indexing();
 
     tauri::Builder::default()
@@ -2034,7 +2064,7 @@ fn main() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }
 #[cfg(test)]
