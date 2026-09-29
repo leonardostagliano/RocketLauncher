@@ -17,6 +17,7 @@
     "test:rust": "cargo test --locked --manifest-path src-tauri/Cargo.toml",
     "release:plan": "node scripts/windows-release.mjs plan",
     "icons": "node scripts/icons.mjs",
+    "licenses": "node scripts/rust-licenses.mjs",
     "smoke:win": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-windows.ps1"
   },
   "devDependencies": {

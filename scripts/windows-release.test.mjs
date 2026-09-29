@@ -14,9 +14,11 @@ import {
   checksumManifest,
   checksumManifestName,
   collectArtifacts,
+  collectLegalFiles,
   compareVersions,
   getBump,
   incrementVersion,
+  legalAssets,
   newestStableTag,
   packageFile,
   planRelease,
@@ -25,6 +27,7 @@ import {
   releaseContractProblems,
   releaseNotes,
   stageArtifacts,
+  stageLegalFiles,
   tauriBuildArgs,
   tauriConfigFile,
   verifyChecksumManifest,
@@ -385,6 +388,10 @@ describe('release artifacts', () => {
     assert.match(notes, /`RocketLauncher-0\.3\.0-win-x64\.msi`: pacchetto MSI/)
     assert.match(notes, /`RocketLauncher-0\.3\.0-win-x64-portable\.exe`: eseguibile singolo/)
     assert.match(notes, /`SHA256SUMS\.txt`/)
+    assert.match(notes, /`LICENSE\.txt`: testo della licenza GPL-3\.0/)
+    assert.match(notes, /`THIRD-PARTY-LICENSES\.txt`: licenze dei componenti di terze parti/)
+    assert.match(notes, /icona nell'area di notifica/)
+    assert.doesNotMatch(notes, /\btray\b/)
     assert.match(notes, /## Aggiornamento/)
     assert.match(notes, /"Controlla aggiornamenti"/)
     assert.match(notes, /%APPDATA%\\it\.stagliano\.rocketlauncher/)
@@ -406,6 +413,81 @@ describe('release artifacts', () => {
       'owner/RocketLauncher'
     )
     assert.doesNotMatch(orphan, /Confronto completo/)
+  })
+
+  it('leaves merge commits out and lists the Velocmd commits of a first release apart, credited to their author', () => {
+    const commit = (letter, message) => ({ sha: letter.repeat(40), message })
+    const plan = {
+      version: '1.0.0',
+      tag: 'v1.0.0',
+      baseVersion: '0.1.8',
+      bump: 'major',
+      sha: 'a'.repeat(40),
+      previousTag: 'v0.1.8',
+      baseline: 'v0.1.8',
+      commits: [
+        commit('b', 'Velocmd Pages'),
+        commit('c', "Merge branch 'main' of https://github.com/YashvardhanG/Velocmd"),
+        commit('d', 'feat!: rename Velocmd to RocketLauncher\n\nBREAKING CHANGE: new identifier'),
+        commit('e', 'fix(search): keep power rows out of recents')
+      ]
+    }
+    const notes = releaseNotes(plan, 'owner/RocketLauncher')
+    assert.doesNotMatch(notes, /Merge branch/)
+    const own = notes.indexOf('- feat!: rename Velocmd to RocketLauncher (ddddddd)')
+    const fix = notes.indexOf('- fix(search): keep power rows out of recents (eeeeeee)')
+    const heading = notes.indexOf('Comprende anche questi commit di Velocmd successivi a v0.1.8, di Yashvardhan Gupta:')
+    const upstream = notes.indexOf('- Velocmd Pages (bbbbbbb)')
+    assert.ok(own !== -1 && fix !== -1 && heading !== -1 && upstream !== -1, notes)
+    assert.ok(own < fix && fix < heading && heading < upstream, 'the fork changes come first, then the Velocmd ones')
+
+    // Senza il tag di partenza la cronologia di Velocmd sarebbe intera: resta nel repository, non nelle note.
+    const withoutTags = releaseNotes({ ...plan, previousTag: null, baseline: null }, 'owner/RocketLauncher')
+    assert.match(withoutTags, /Prima release di RocketLauncher, basata su Velocmd di Yashvardhan Gupta\./)
+    assert.match(withoutTags, /impostazioni, elementi recenti e indice di Velocmd non vengono importati/)
+    assert.doesNotMatch(withoutTags, /Velocmd Pages|Comprende anche/)
+    assert.match(withoutTags, /^- feat!: rename Velocmd to RocketLauncher \(ddddddd\)$/m)
+
+    // Dopo la prima release ogni commit non di merge e' una modifica di RocketLauncher, convenzionale o no.
+    const later = releaseNotes({ ...plan, baseline: null, previousTag: 'v1.0.0' }, 'owner/RocketLauncher')
+    assert.match(later, /^- Velocmd Pages \(bbbbbbb\)$/m)
+    assert.doesNotMatch(later, /Comprende anche|Prima release/)
+  })
+})
+
+describe('legal files of the release', () => {
+  let directory = ''
+  let source = ''
+
+  before(() => {
+    directory = mkdtempSync(join(tmpdir(), 'rocketlauncher-legal-'))
+    source = mkdtempSync(join(tmpdir(), 'rocketlauncher-legal-src-'))
+    writeFileSync(join(source, 'LICENSE'), 'GNU GENERAL PUBLIC LICENSE\n')
+    writeFileSync(join(source, 'THIRD-PARTY-LICENSES.txt'), 'RocketLauncher - third-party licenses\n')
+  })
+
+  after(() => {
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(source, { recursive: true, force: true })
+  })
+
+  it('stages LICENSE and the third-party licenses under their asset names', () => {
+    assert.throws(() => collectLegalFiles(directory), /Manca LICENSE\.txt/)
+    assert.deepEqual(stageLegalFiles({ outputDirectory: directory, cwd: source }), Object.keys(legalAssets))
+    assert.equal(readFileSync(join(directory, 'LICENSE.txt'), 'utf8'), 'GNU GENERAL PUBLIC LICENSE\n')
+    assert.deepEqual(collectLegalFiles(directory), ['LICENSE.txt', 'THIRD-PARTY-LICENSES.txt'])
+  })
+
+  it('refuses to publish an empty or missing licence file', () => {
+    writeFileSync(join(directory, 'THIRD-PARTY-LICENSES.txt'), '')
+    assert.throws(() => collectLegalFiles(directory), /Manca THIRD-PARTY-LICENSES\.txt/)
+    assert.throws(() => stageLegalFiles({ outputDirectory: directory, cwd: directory }), /Impossibile copiare LICENSE/)
+  })
+
+  it('points at files that exist in this repository', () => {
+    for (const source of Object.values(legalAssets)) {
+      assert.ok(readFileSync(join(repositoryRoot, source)).length > 0, source)
+    }
   })
 })
 

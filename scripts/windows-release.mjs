@@ -17,9 +17,9 @@ import { UPDATE_REPOSITORY } from '../src/update-source.js'
 //   prepare: calcola versione e tag dai conventional commit e dalle release GitHub (per la prima release del fork parte
 //            dall'ultimo tag stabile di Velocmd raggiungibile), senza modificare alcun file del checkout.
 //   build:   `tauri build` con la versione calcolata passata come patch JSON di --config (nessuna shell di mezzo).
-//   stage:   copia setup NSIS, MSI ed eseguibile portable in release/ con i nomi stabili degli asset e scrive
-//            SHA256SUMS.txt.
-//   publish: ricontrolla SHA256SUMS.txt, bozza, upload verificato, poi Latest.
+//   stage:   copia setup NSIS, MSI ed eseguibile portable in release/ con i nomi stabili degli asset, scrive
+//            SHA256SUMS.txt e aggiunge le licenze (LICENSE.txt, THIRD-PARTY-LICENSES.txt).
+//   publish: ricontrolla SHA256SUMS.txt e le licenze, bozza, upload verificato, poi Latest.
 //   plan:    solo in locale: la pianificazione di prepare senza GitHub (release da RELEASES_FILE, altrimenti nessuna)
 //            e l'anteprima delle note; non scrive nulla su GitHub.
 
@@ -33,6 +33,12 @@ export const appIdentifier = 'it.stagliano.rocketlauncher'
 export const msiLanguage = 'it-IT'
 export const nsisLanguage = 'Italian'
 export const checksumManifestName = 'SHA256SUMS.txt'
+/**
+ * Licenze pubblicate accanto agli eseguibili (nome dell'asset -> file del repository): il testo della GPL-3.0, che
+ * anche i due installer mostrano (bundle.licenseFile), e le licenze di terze parti generate da `npm run licenses`.
+ * Servono soprattutto a chi scarica il portable, che non ha un installer che le mostri.
+ */
+export const legalAssets = { 'LICENSE.txt': 'LICENSE', 'THIRD-PARTY-LICENSES.txt': 'THIRD-PARTY-LICENSES.txt' }
 export const releaseDirectory = 'release'
 export const tauriCli = 'node_modules/@tauri-apps/cli/tauri.js'
 
@@ -78,7 +84,7 @@ export function assertMsiVersion(version) {
   const [major, minor, patch] = versionParts(version)
   if (major > 255 || minor > 255 || patch > 65535) {
     throw new Error(
-      `La versione ${version} non e' accettata dall'MSI: major e minor al massimo 255, patch al massimo 65535.`
+      `La versione ${version} non è accettata dall'MSI: major e minor al massimo 255, patch al massimo 65535.`
     )
   }
   return version
@@ -103,7 +109,7 @@ function readJson(cwd, file) {
   try {
     return JSON.parse(text.replace(/^﻿/, ''))
   } catch (error) {
-    throw new Error(`${file} non e' JSON valido: ${error.message}`)
+    throw new Error(`${file} non è JSON valido: ${error.message}`)
   }
 }
 
@@ -114,7 +120,7 @@ function readJson(cwd, file) {
 export function readBaseVersion(cwd = process.cwd()) {
   const version = readJson(cwd, packageFile).version
   if (typeof version !== 'string' || !stableVersion.test(version))
-    throw new Error(`${packageFile}: "version" non e' una SemVer stabile MAJOR.MINOR.PATCH: ${version}`)
+    throw new Error(`${packageFile}: "version" non è una SemVer stabile MAJOR.MINOR.PATCH: ${version}`)
   const reference = readJson(cwd, tauriConfigFile).version
   if (reference !== tauriVersionReference) {
     throw new Error(
@@ -204,9 +210,10 @@ export function planRelease({ cwd = process.cwd(), releases, sha = 'HEAD' }) {
   }
   const ownDraft = candidates.find((release) => release.draft && release.target_commitish === head)
 
-  // Prima release del fork: GitHub copia i tag di Velocmd (v0.1.0..v0.1.8) ma non le release. Senza release pubblicate
-  // si parte dal tag stabile piu' recente raggiungibile da HEAD e non rivendicato da una release di questo repository:
-  // le note elencano solo le modifiche successive a Velocmd e la versione non scende sotto quella del tag.
+  // Prima release del fork: il tag v0.1.8 di Velocmd va spinto sul fork prima di main (un fork creato con l'opzione
+  // predefinita "solo il branch main" non ha tag, e le release non si copiano mai). Senza release pubblicate si parte dal tag stabile piu' recente raggiungibile
+  // da HEAD e non rivendicato da una release di questo repository: le note elencano solo le modifiche successive a quel
+  // tag e la versione non scende sotto la sua. Senza alcun tag la versione resta la stessa, ma il confronto manca.
   let baseline = null
   if (!previous) {
     const claimed = new Set(releases.map((release) => release.tag_name))
@@ -347,6 +354,28 @@ export function collectArtifacts(directory, version) {
   return files
 }
 
+/** Copia le licenze in `outputDirectory` con i nomi degli asset e le restituisce come collectLegalFiles. */
+export function stageLegalFiles({ outputDirectory, cwd = process.cwd() }) {
+  mkdirSync(outputDirectory, { recursive: true })
+  for (const [asset, source] of Object.entries(legalAssets)) {
+    try {
+      copyFileSync(resolve(cwd, source), join(outputDirectory, asset))
+    } catch (error) {
+      throw new Error(`Impossibile copiare ${source}: ${error.code ?? error.message}`)
+    }
+  }
+  return collectLegalFiles(outputDirectory)
+}
+
+/** Le licenze da pubblicare in `directory`: tutte presenti e non vuote, altrimenti la release non parte. */
+export function collectLegalFiles(directory) {
+  return Object.keys(legalAssets).map((name) => {
+    const size = statSync(resolve(directory, name), { throwIfNoEntry: false })?.size ?? 0
+    if (size === 0) throw new Error(`Manca ${name} in ${directory}: eseguire prima stage.`)
+    return name
+  })
+}
+
 /** Manifest nel formato di `sha256sum` (`<hash>  <nome>`, una riga per file, LF), verificabile con Get-FileHash. */
 export function checksumManifest(directory, files) {
   const lines = [...files].sort().map((name) => {
@@ -379,26 +408,42 @@ export function verifyChecksumManifest(directory, files) {
     throw new Error(`${checksumManifestName} non corrisponde agli artefatti in ${directory}: rieseguire stage.`)
 }
 
+const conventionalSubject = /^[a-z][\w-]*(?:\([^\r\n)]+\))?!?: \S/
+const mergeSubject = /^Merge (?:branch|pull request|remote-tracking branch|tag) /
+
 export function releaseNotes(plan, repository) {
   const assets = releaseAssetNames(plan.version)
+  const subject = (commit) => commit.message.split(/\r?\n/)[0]
+  const line = (commit) => `- ${subject(commit)} (${commit.sha.slice(0, 7)})`
+  // I merge non aggiungono modifiche proprie: le loro modifiche sono gia' elencate con i commit uniti.
+  const changes = plan.commits.filter((commit) => !mergeSubject.test(subject(commit)))
+  // Prima release del fork (nessuna release pubblicata prima): i commit di RocketLauncher seguono i conventional
+  // commit, quelli senza tipo sono di Velocmd, successivi al tag di partenza. Si elencano a parte, con il loro autore;
+  // senza tag di partenza sarebbero l'intera cronologia di Velocmd e restano solo nel repository.
+  const firstRelease = Boolean(plan.baseline) || !plan.previousTag
+  const upstream = firstRelease ? changes.filter((commit) => !conventionalSubject.test(subject(commit))) : []
+  const own = changes.filter((commit) => !upstream.includes(commit))
   return [
     'RocketLauncher per Windows x64: installer, pacchetto MSI ed eseguibile portable.',
     '',
     `Versione **${plan.version}**: incremento **${plan.bump}** da ${plan.baseVersion}.`,
     `Commit: ${plan.sha}.`,
-    ...(plan.baseline
+    ...(firstRelease
       ? [
           '',
-          `Prima release di RocketLauncher: le modifiche elencate partono da Velocmd ${plan.baseline} di Yashvardhan Gupta.`,
-          'RocketLauncher è un\'applicazione distinta da Velocmd: impostazioni, elementi recenti e indice di Velocmd non vengono importati. Se Velocmd è ancora installato, disinstallarlo per liberare la scorciatoia globale.'
+          plan.baseline
+            ? `Prima release di RocketLauncher: le modifiche elencate partono da Velocmd ${plan.baseline} di Yashvardhan Gupta.`
+            : 'Prima release di RocketLauncher, basata su Velocmd di Yashvardhan Gupta.',
+          'RocketLauncher è un\'applicazione distinta da Velocmd: impostazioni, elementi recenti e indice di Velocmd non vengono importati. Se Velocmd è ancora installato, disinstallarlo per liberare i tasti di scelta rapida.'
         ]
       : []),
     '',
     '## Modifiche',
     '',
-    ...plan.commits.map(
-      (commit) => `- ${commit.message.split(/\r?\n/)[0]} (${commit.sha.slice(0, 7)})`
-    ),
+    ...own.map(line),
+    ...(upstream.length > 0 && plan.baseline
+      ? ['', `Comprende anche questi commit di Velocmd successivi a ${plan.baseline}, di Yashvardhan Gupta:`, '', ...upstream.map(line)]
+      : []),
     '',
     ...(plan.previousTag
       ? [
@@ -412,13 +457,15 @@ export function releaseNotes(plan, repository) {
     `- \`${assets.msi}\`: pacchetto MSI per installazioni gestite, per tutti gli utenti (richiede privilegi di amministratore).`,
     `- \`${assets.portable}\`: eseguibile singolo senza installazione; usa il WebView2 Runtime già presente in Windows 10 e 11 aggiornati.`,
     `- \`${checksumManifestName}\`: checksum SHA-256 dei tre file (\`Get-FileHash <file> -Algorithm SHA256\`).`,
+    '- `LICENSE.txt`: testo della licenza GPL-3.0 di RocketLauncher e Velocmd.',
+    '- `THIRD-PARTY-LICENSES.txt`: licenze dei componenti di terze parti inclusi negli eseguibili (font, icone, crate Rust).',
     '',
     '## Aggiornamento',
     '',
     'Dall\'app: Impostazioni > "Controlla aggiornamenti" segnala una versione più recente e apre questa pagina.',
     'Installer: eseguire il nuovo setup, che aggiorna l\'installazione esistente; se trova un\'installazione MSI di RocketLauncher la rimuove prima. Scegliere un solo formato di installazione.',
-    'Portable: uscire da RocketLauncher dall\'icona nella tray e sostituire l\'eseguibile con quello nuovo; con l\'avvio automatico attivo, mantenere lo stesso nome e percorso del file oppure riattivarlo dalle Impostazioni.',
-    `Gli aggiornamenti conservano scorciatoia e impostazioni (\`%APPDATA%\\${appIdentifier}\`), indice dei file e preferenze dell'interfaccia (\`%LOCALAPPDATA%\\${appIdentifier}\`).`,
+    'Portable: uscire da RocketLauncher dall\'icona nell\'area di notifica e sostituire l\'eseguibile con quello nuovo; con l\'avvio automatico attivo, mantenere lo stesso nome e percorso del file oppure riattivarlo dalle Impostazioni.',
+    `Gli aggiornamenti conservano tasti di scelta rapida e impostazioni (\`%APPDATA%\\${appIdentifier}\`), indice dei file e preferenze dell'interfaccia (\`%LOCALAPPDATA%\\${appIdentifier}\`).`,
     '',
     'I file non sono firmati digitalmente: al primo avvio Windows SmartScreen può mostrare "Windows ha protetto il PC". Dopo aver verificato il checksum, scegliere "Ulteriori informazioni" > "Esegui comunque".',
     '',
@@ -518,7 +565,8 @@ function stage() {
     version: plan.version
   })
   process.stdout.write(writeChecksumManifest(directory, plan.version))
-  for (const name of files) console.log(`${name}  ${statSync(resolve(directory, name)).size} byte`)
+  const legal = stageLegalFiles({ outputDirectory: directory })
+  for (const name of [...files, ...legal]) console.log(`${name}  ${statSync(resolve(directory, name)).size} byte`)
 }
 
 function publish() {
@@ -527,6 +575,7 @@ function publish() {
   const directory = resolve(releaseDirectory)
   const files = collectArtifacts(directory, plan.version)
   verifyChecksumManifest(directory, files)
+  const legal = collectLegalFiles(directory)
   const notesPath = `${process.env.RELEASE_PLAN}.md`
   writeFileSync(notesPath, releaseNotes(plan, process.env.GH_REPO))
   const existing = listReleases().find((release) => release.tag_name === plan.tag)
@@ -549,7 +598,7 @@ function publish() {
   } else {
     gh('release', 'edit', plan.tag, '--title', plan.tag, '--notes-file', notesPath)
   }
-  const assets = [...files, checksumManifestName]
+  const assets = [...files, checksumManifestName, ...legal]
   gh('release', 'upload', plan.tag, ...assets.map((name) => resolve(directory, name)), '--clobber')
   const uploaded = JSON.parse(gh('release', 'view', plan.tag, '--json', 'assets')).assets
   for (const name of assets) {

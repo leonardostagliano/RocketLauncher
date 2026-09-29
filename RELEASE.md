@@ -16,6 +16,9 @@ ChessAdvisor and AIUsageMonitor, adapted to Tauri.
 | `src-tauri/Cargo.toml` `version` | `0.0.0` | Not the app version. It stays frozen, so a release never changes `Cargo.toml` or `Cargo.lock`. |
 | GitHub Releases / tags `vX.Y.Z` | computed | The authority after the first release. |
 
+The Cargo package is called `rocket-launcher` on purpose (a debug build is `src-tauri\target\debug\rocket-launcher.exe`);
+every file users see is named after `productName` and `mainBinaryName`, `RocketLauncher`.
+
 CI does not edit any of these files. It passes the computed version to the build:
 
 ```
@@ -45,20 +48,27 @@ already part of a release publishes one: a push of only `ci:`/`docs:` commits st
 
 ### First release: 1.0.0
 
-The fork has Velocmd's tags `v0.1.0`..`v0.1.8` but no GitHub Releases. When there is no published release, the range
-starts at the newest stable `vX.Y.Z` tag reachable from `HEAD` that no release of this repository claims, which is
-`v0.1.8`. So:
+GitHub Releases are never copied to a fork, and a fork made with GitHub's default "copy the main branch only" has no
+tags either: the Velocmd tag `v0.1.8` is pushed once, before `main`
+(see [One-time setup](#one-time-setup-of-the-github-repository), step 3). When there is no published release, the
+range starts at the newest stable `vX.Y.Z` tag reachable from `HEAD` that no release of this repository claims, which
+is `v0.1.8`. So:
 
-- the notes list only what changed after Velocmd 0.1.8, with a `v0.1.8...v1.0.0` compare link;
+- the notes start from Velocmd 0.1.8, with a `v0.1.8...v1.0.0` compare link. The RocketLauncher commits come first.
+  The base is upstream `main` at `5e07a52`, that is `v0.1.8` plus five later Velocmd commits: those without a
+  conventional type are listed apart, credited to Yashvardhan Gupta. Merge commits are never listed;
 - the rebrand commit is `feat!:` with a `BREAKING CHANGE` footer (new identifier, Velocmd settings, recents and index
   are not imported), so the bump is major: **0.1.8 → 1.0.0**, with `package.json` still at `0.1.8`;
-- if the fork was created without the tags, the range is the whole history, and the version is still 1.0.0.
+- without the tag the range is the whole history: the version is still 1.0.0, but there is no compare link and the
+  notes leave the Velocmd history out.
 
 Preview it locally at any time (read-only, nothing is sent to GitHub):
 
 ```powershell
-npm run release:plan        # e.g. "v1.0.0: 0.1.8 -> 1.0.0 (major, 10 commit, da v0.1.8)" plus the release notes
+npm run release:plan        # e.g. "v1.0.0: 0.1.8 -> 1.0.0 (major, N commit, da v0.1.8)" plus the release notes
 ```
+
+N is the number of commits since `v0.1.8`, so it grows with every commit.
 
 `plan` assumes there are no releases yet. To preview a later release, save the release list first and pass it:
 `gh api --paginate --slurp repos/leonardostagliano/RocketLauncher/releases > releases.json`, then
@@ -70,7 +80,9 @@ npm run release:plan        # e.g. "v1.0.0: 0.1.8 -> 1.0.0 (major, 10 commit, da
   *Latest* back.
 - `publish` first creates a **draft** that targets the exact commit, uploads, checks every asset size, and only then
   publishes it as *Latest*. If a run is interrupted, the next run of the same commit reuses that draft. A run of a
-  different commit skips the reserved version with a patch bump and leaves the draft alone.
+  different commit skips the reserved version with a patch bump and leaves the draft alone. So, to keep the first
+  release at 1.0.0 after a failed publish, rerun the failed run (or delete its leftover draft) before pushing a fix;
+  otherwise the fix is released as 1.0.1.
 - If the newest release is not an ancestor of `HEAD` (a rewritten `main`), the run fails.
 - If the computed tag already exists and is not this commit's recoverable draft, the run fails.
 - The version must fit the MSI limits (major and minor ≤ 255, patch ≤ 65535). `prepare` checks this before the build.
@@ -83,8 +95,12 @@ npm run release:plan        # e.g. "v1.0.0: 0.1.8 -> 1.0.0 (major, 10 commit, da
 | `RocketLauncher-X.Y.Z-win-x64.msi` | WiX MSI, per machine, for managed installs. Needs administrator rights. |
 | `RocketLauncher-X.Y.Z-win-x64-portable.exe` | The bare executable (VC++ runtime linked statically; needs WebView2). |
 | `SHA256SUMS.txt` | `<sha256>  <file name>` for the three files, one LF-terminated line each. |
+| `LICENSE.txt` | The GPL-3.0 text, a copy of [`LICENSE`](LICENSE). |
+| `THIRD-PARTY-LICENSES.txt` | The licenses of the third-party material in the executables: Inter, Lucide and every Rust crate compiled in. |
 
 - The asset names are stable: scripts and a future in-app downloader can rely on them.
+- Both installers show the GPL-3.0 (`bundle.licenseFile`) before installing; the two license assets cover the portable
+  executable, which has no installer.
 - Both installers are in Italian: NSIS `Italian`, and WiX `it-IT` with
   [`src-tauri/wix/it-IT.wxl`](src-tauri/wix/it-IT.wxl), which translates the four Tauri strings WiX does not cover.
 - The MSI upgrade code is pinned to `3852b432-3d21-5f51-a237-7dc0d6f152e6`, the value Tauri derives for
@@ -110,7 +126,8 @@ npm run release:plan        # e.g. "v1.0.0: 0.1.8 -> 1.0.0 (major, 10 commit, da
    `cargo test --locked --manifest-path src-tauri/Cargo.toml`.
 5. **Build and stage**: `build` runs the `tauri build` command above from Node with an argument array, so no shell
    quoting is involved. `stage` copies the NSIS setup, the MSI and `RocketLauncher.exe` to `release/` under the asset
-   names and writes `SHA256SUMS.txt`. Each bundle folder must contain exactly the file of the computed version.
+   names and writes `SHA256SUMS.txt`, then adds `LICENSE.txt` and `THIRD-PARTY-LICENSES.txt`. Each bundle folder must
+   contain exactly the file of the computed version.
 6. **Smoke test**: [`scripts/smoke-windows.ps1`](scripts/smoke-windows.ps1) checks:
    - the checksums, the PE header (x64, GUI) and the executable VERSIONINFO (strings and fixed part, product name,
      publisher, and a copyright that still names Yashvardhan Gupta);
@@ -124,12 +141,24 @@ npm run release:plan        # e.g. "v1.0.0: 0.1.8 -> 1.0.0 (major, 10 commit, da
 7. **Checkout unchanged**: `git status --porcelain --untracked-files=all` must be empty, so the release is exactly the
    tagged commit. The Tauri CLI rewrites `src-tauri/Cargo.toml` with LF line endings at every build, so
    `.gitattributes` checks that file out with LF. Keep it LF, otherwise this step fails on Windows.
-8. **Publish**: `SHA256SUMS.txt` must still match the files, then draft, upload, size check, *Latest*.
+8. **Publish**: `SHA256SUMS.txt` must still match the files and both license files must be there, then draft, upload,
+   size check, *Latest*.
 
 Build time on a hosted runner is not measured yet. On the maintainer's 12-thread laptop, a cold release build (fat LTO,
-one codegen unit) takes about 26 minutes. With the dependencies already compiled, rebuilding the app plus NSIS and MSI
-bundling takes about 10 minutes, and that is roughly what the Cargo cache saves on later CI runs. The job timeout is 60
-minutes.
+one codegen unit) took 17 to 26 minutes, and the first CI run also builds every dependency in debug for `cargo test`,
+on a 4-vCPU runner. With the dependencies already compiled, rebuilding the app plus NSIS and MSI bundling takes about
+10 minutes, and that is roughly what the Cargo cache saves on later CI runs. The job timeout is 120 minutes, and the
+cache is saved even when a run fails or times out (`cache-on-failure`), so a retry never starts cold again. Lower the
+timeout once a real run has been measured.
+
+## Third-party licenses
+
+[`THIRD-PARTY-LICENSES.txt`](THIRD-PARTY-LICENSES.txt) is generated, never edited by hand: `npm run licenses`
+(`scripts/rust-licenses.mjs`) reads `cargo metadata` for the Windows x64 target and collects the license files of every
+crate compiled into the executable, after the Inter and Lucide notices of
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). The file records a fingerprint of `Cargo.lock`, the notices and the
+Inter license; `tests/third-party-licenses.test.mjs` fails when one of them changed without regenerating it. So after
+any dependency change run `npm run licenses` and commit the result, or `npm test` (and the release) stops.
 
 ## Running the release build locally
 
@@ -142,7 +171,7 @@ npm test
 $env:RELEASE_PLAN = "$env:TEMP\rl-plan.json"
 node scripts/windows-release.mjs plan     # writes the plan CI would compute with no releases (v1.0.0 today)
 node scripts/windows-release.mjs build    # tauri build --ci --bundles nsis,msi --config {"version":"1.0.0"} -- --locked
-node scripts/windows-release.mjs stage    # release\RocketLauncher-1.0.0-win-x64-*.exe/.msi + SHA256SUMS.txt
+node scripts/windows-release.mjs stage    # release\RocketLauncher-1.0.0-win-x64-*.exe/.msi, SHA256SUMS.txt, licenses
 pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-windows.ps1 -Version 1.0.0
 git status --porcelain --untracked-files=all
 ```
@@ -155,17 +184,25 @@ git status --porcelain --untracked-files=all
 
 ## One-time setup of the GitHub repository
 
-1. Actions are disabled on a new fork: open the **Actions** tab and enable workflows.
-2. The workflow asks for `contents: write`. If the first `gh release create` fails with HTTP 403, set
+1. Create the repository as exactly **`leonardostagliano/RocketLauncher`**, and keep it **public**. Either fork
+   `YashvardhanG/Velocmd` and change the name in GitHub's fork dialog (it proposes `Velocmd`), or create a new empty
+   public repository with that name. The name must match `UPDATE_REPOSITORY` in `src/update-source.js`, or `prepare`
+   refuses to publish. The app checks for updates without authentication, so a private repository answers 404 and
+   every user would read "Già aggiornato" forever. The `origin` remote of the maintainer's clone already points there.
+2. Actions are disabled on a new fork: open the **Actions** tab and enable workflows. The workflow asks for
+   `contents: write`. If the first `gh release create` fails with HTTP 403, set
    *Settings → Actions → General → Workflow permissions* to **Read and write permissions**.
-3. Make sure the fork has the Velocmd baseline tag: `git ls-remote --tags origin v0.1.8`. If it is missing, push only
-   that tag once with `git push origin v0.1.8`. Without it the first release is still 1.0.0, but its notes list the
-   whole Velocmd history.
+3. Push the Velocmd baseline tag **before** `main`: `git push origin v0.1.8`, then check it with
+   `git ls-remote --tags origin v0.1.8`. A new repository, or a default fork, has no tags. Without it the release is
+   still 1.0.0, but its notes have no compare link and no Velocmd baseline.
 4. Keep upstream tags out of this repository: `git config remote.upstream.tagOpt --no-tags` (already set in the
    maintainer's clone). Never `git push --tags`: CI creates the release tags.
-5. Merge `feature/rocketlauncher` into `main` with a merge commit or a fast-forward, so the `feat!:` rebrand commit and
-   its `BREAKING CHANGE` footer are part of the range. A GitHub squash merge also works, because the footer stays at
-   the start of a line. Then push `main`.
+5. Bring `feature/rocketlauncher` into `main` with a fast-forward or a merge commit, for example from the local clone,
+   so the `feat!:` rebrand commit and its `BREAKING CHANGE` footer are part of the range. Avoid a GitHub squash merge:
+   only a squash message that keeps the `BREAKING CHANGE:` footer at the start of a line still gives 1.0.0, and the
+   "pull request title" squash settings drop it (the release would be 0.1.9). Run `npm run release:plan` on the merged
+   `main` and check it says `v1.0.0` before pushing. The credential that pushes needs the `workflow` scope, because
+   the push adds `.github/workflows`.
 
 ## In-app update check
 

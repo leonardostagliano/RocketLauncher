@@ -1,7 +1,10 @@
 # Third-party notices
 
-RocketLauncher bundles the following third-party material in its user interface. Rust and npm dependencies are listed
-with their licenses in `src-tauri/Cargo.lock` and `package-lock.json`.
+RocketLauncher bundles the following third-party material in its user interface. The Rust crates compiled into the
+executable are listed, with the license files each crate publishes, in
+[`THIRD-PARTY-LICENSES.txt`](THIRD-PARTY-LICENSES.txt). That file also repeats these notices; it is generated from
+`src-tauri/Cargo.lock` by `npm run licenses` and attached to every release next to the executables. The npm package in
+`package-lock.json` (the Tauri CLI) is a build tool and is not distributed.
 
 ## Inter
 

@@ -20,7 +20,10 @@ jobs:
     # Etichetta esplicita, come ChessAdvisor: windows-2022 ha rustup e la funzionalita' VBScript che serve a light.exe
     # di WiX per l'MSI (su windows-2025 e' opzionale). Un'etichetta fissa non cambia immagine sotto la toolchain.
     runs-on: windows-2022
-    timeout-minutes: 60
+    # Un run a freddo compila circa 300 crate due volte (cargo test in debug, poi il build release con LTO): in locale,
+    # su 12 thread, il solo build release a freddo ha richiesto 17-26 minuti e il runner ospitato ha 4 vCPU. Il margine
+    # resta finche' la durata di un run a freddo su GitHub non e' stata misurata.
+    timeout-minutes: 120
     defaults:
       run:
         shell: pwsh
@@ -75,6 +78,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri -> target
+          # Anche un run fallito (o scaduto) salva le dipendenze compilate: il tentativo successivo non riparte a freddo.
+          cache-on-failure: true
 
       # npm test: node --test su scripts/*.test.mjs e tests/*.test.mjs, lo stesso elenco usato in locale.
       - name: Test release scripts, update source and repository contract
@@ -91,7 +96,8 @@ jobs:
 
       # La versione calcolata arriva a tauri build come --config {"version": ...}: la CLI la inoltra a cargo in
       # TAURI_CONFIG (VERSIONINFO, getVersion) e la usa per NSIS e MSI. Nessun file del checkout viene riscritto.
-      # stage copia i tre file in release/ con i nomi degli asset e scrive SHA256SUMS.txt, che publish ricontrolla.
+      # stage copia i tre file in release/ con i nomi degli asset e scrive SHA256SUMS.txt, che publish ricontrolla, poi
+      # aggiunge LICENSE.txt e THIRD-PARTY-LICENSES.txt.
       - name: Build NSIS installer, MSI and portable executable
         if: steps.version.outputs.skip != 'true'
         env:
