@@ -30,7 +30,7 @@ searchWrapper.insertAdjacentHTML('beforeend', loaderHtml);
 const searchLoader = document.getElementById("search-loader");
 const CURRENT_VERSION = "0.1.8";
 let isUpdateAvailable = false;
-let latestReleaseUrl = "https://github.com/YashvardhanG/Velocmd/releases/latest";
+let latestReleaseUrl = "https://github.com/leonardostagliano/RocketLauncher/releases/latest";
 
 let settingsIndex = -1;
 let dropdownIndex = -1;
@@ -250,7 +250,7 @@ async function checkUpdates(isAuto = false) {
       updateBtn.classList.add("btn-secondary");
     }
 
-    const response = await fetch("https://api.github.com/repos/YashvardhanG/Velocmd/releases/latest");
+    const response = await fetch("https://api.github.com/repos/leonardostagliano/RocketLauncher/releases/latest");
     const data = await response.json();
 
     if (!data.tag_name) return;
@@ -264,7 +264,7 @@ async function checkUpdates(isAuto = false) {
       if (isAuto) {
         input.placeholder = "⚡A Newer version is available, download now!";
         setTimeout(() => {
-          input.placeholder = "⚡Velocmd running...";
+          input.placeholder = "⚡RocketLauncher running...";
         }, 2000);
       }
 
@@ -302,7 +302,7 @@ if (updateBtn) {
     if (isUpdateAvailable) {
       updateBtn.textContent = "Verifying...";
       try {
-        const response = await fetch("https://api.github.com/repos/YashvardhanG/Velocmd/releases/latest");
+        const response = await fetch("https://api.github.com/repos/leonardostagliano/RocketLauncher/releases/latest");
         const data = await response.json();
         const latestVersion = data.tag_name?.replace("v", "");
 
@@ -407,7 +407,7 @@ function renderChips() {
   if (hasPrivate) {
     input.placeholder = "🕶️ Private mode | Browsing Incognito";
   } else if (input.placeholder.includes("Private mode") || input.placeholder.includes("🕶")) {
-    input.placeholder = "⚡Velocmd running...";
+    input.placeholder = "⚡RocketLauncher running...";
   }
 }
 
@@ -689,14 +689,14 @@ async function openFile(path, kind, name) {
     localStorage.setItem("recentFiles", JSON.stringify(state.recentFiles));
   }
 
-  if (path === "velo:request_shutdown") {
+  if (path === "rocket:request_shutdown") {
     input.value = "";
     state.activeFilters = [];
     renderChips();
 
     state.results = [
       { name: "✅ Yes, I am sure (Shutdown)", path: "cmd:shutdown /s /t 0", kind: "command", score: 10 },
-      { name: "❌ No, Cancel", path: "velo:cancel_power", kind: "command", score: 9 }
+      { name: "❌ No, Cancel", path: "rocket:cancel_power", kind: "command", score: 9 }
     ];
 
     state.selectedIndex = 0;
@@ -704,21 +704,21 @@ async function openFile(path, kind, name) {
     return;
   }
 
-  if (path === "velo:request_restart") {
+  if (path === "rocket:request_restart") {
     input.value = "";
     state.activeFilters = [];
     renderChips();
 
     state.results = [
       { name: "✅ Yes, I am sure (Restart)", path: "cmd:shutdown /r /t 0", kind: "command", score: 10 },
-      { name: "❌ No, Cancel", path: "velo:cancel_power", kind: "command", score: 9 }
+      { name: "❌ No, Cancel", path: "rocket:cancel_power", kind: "command", score: 9 }
     ];
     state.selectedIndex = 0;
     render();
     return;
   }
 
-  if (path === "velo:cancel_power") {
+  if (path === "rocket:cancel_power") {
     input.value = "";
     state.activeFilters = [];
     renderChips();
@@ -734,7 +734,7 @@ async function openFile(path, kind, name) {
     return;
   }
 
-  if (path === "velo:settings") {
+  if (path === "rocket:settings") {
     await toggleSettings();
     input.value = "";
     state.results = [];
@@ -743,7 +743,7 @@ async function openFile(path, kind, name) {
     return;
   }
 
-  if (path === "velo:clear_recents") {
+  if (path === "rocket:clear_recents") {
     state.recentFiles = [];
     localStorage.setItem("recentFiles", JSON.stringify([]));
     input.value = "";
@@ -759,7 +759,7 @@ async function openFile(path, kind, name) {
     return;
   }
 
-  if (path === "velo:toggle_recents") {
+  if (path === "rocket:toggle_recents") {
     state.showRecents = !state.showRecents;
     localStorage.setItem("showRecentsSetting", state.showRecents);
     recentsToggle.checked = state.showRecents;
@@ -777,27 +777,27 @@ async function openFile(path, kind, name) {
     return;
   }
 
-  if (path === "velo:help") {
-    await invoke("open_file", { path: "https://yashvardhang.github.io/Velocmd/" });
+  if (path === "rocket:help") {
+    await invoke("open_file", { path: "https://github.com/leonardostagliano/RocketLauncher#readme" });
     input.value = "";
     state.results = [];
     render();
     return;
   }
 
-  if (path === "velo:reset_position") {
+  if (path === "rocket:reset_position") {
     await invoke("reset_window");
     input.value = "";
     render();
     return;
   }
 
-  if (path === "velo:quit") {
+  if (path === "rocket:quit") {
     await invoke("quit_app");
     return;
   }
 
-  if (path === "velo:close_window") {
+  if (path === "rocket:close_window") {
     await invoke("close_active_window");
     input.value = "";
     state.activeFilters = [];
@@ -812,7 +812,7 @@ async function openFile(path, kind, name) {
     return;
   }
 
-  if (path === "velo:show_desktop") {
+  if (path === "rocket:show_desktop") {
     await invoke("show_desktop");
     input.value = "";
     state.activeFilters = [];
@@ -821,7 +821,7 @@ async function openFile(path, kind, name) {
     return;
   }
 
-  if (path === "velo:active_tabs") {
+  if (path === "rocket:active_tabs") {
     state.activeFilters.push("/tabs");
     renderChips();
     input.value = "";
@@ -840,7 +840,7 @@ async function openFile(path, kind, name) {
     return;
   }
 
-  if (path === "velo:refresh") {
+  if (path === "rocket:refresh") {
     input.disabled = true;
     input.value = "";
     input.placeholder = "⌛ Refreshing index...";
@@ -876,8 +876,8 @@ async function openFile(path, kind, name) {
     return;
   }
 
-  if (path.startsWith("velo:media_")) {
-    const action = path.replace("velo:media_", "");
+  if (path.startsWith("rocket:media_")) {
+    const action = path.replace("rocket:media_", "");
     await invoke("execute_media_key", { action });
 
     input.value = "";
@@ -1018,7 +1018,7 @@ input.addEventListener("input", async (e) => {
       { name: "Files", path: `${prefix}files `, kind: "filter", score: 98 },
       ...driveItems,
       { name: "Active Tabs", path: `${prefix}tabs `, kind: "filter", score: 95 },
-      { name: "Velo Commands", path: `${prefix}velo `, kind: "filter", score: 94 },
+      { name: "RocketLauncher Commands", path: `${prefix}rocket `, kind: "filter", score: 94 },
       { name: "This PC", path: `${prefix}pc `, kind: "filter", score: 93 },
       { name: "Websites", path: `${prefix}web `, kind: "filter", score: 92 },
       { name: "Settings", path: `${prefix}settings`, kind: "filter", score: 91 },
@@ -1313,7 +1313,7 @@ document.addEventListener('keydown', async (e) => {
       const kind = selectedEl.dataset.kind;
 
       if (kind !== 'command' && kind !== 'filter' && kind !== 'website' && kind !== 'terminal_command'
-        && !filePath.startsWith('velo:') && !filePath.startsWith('cmd:') && !filePath.startsWith('nox:')
+        && !filePath.startsWith('rocket:') && !filePath.startsWith('cmd:') && !filePath.startsWith('nox:')
         && !filePath.startsWith('http://') && !filePath.startsWith('https://') && !filePath.startsWith('hwnd:')) {
         showInExplorer(filePath);
       }
@@ -1551,7 +1551,7 @@ initAutostart();
 if (helpBtn) {
   helpBtn.onclick = async (e) => {
     e.stopPropagation();
-    await invoke("open_file", { path: "https://yashvardhang.github.io/Velocmd/" });
+    await invoke("open_file", { path: "https://github.com/leonardostagliano/RocketLauncher#readme" });
   };
 }
 
@@ -1585,7 +1585,7 @@ input.focus();
 listen("index_refreshed", async () => {
   input.disabled = false;
   input.value = "";
-  input.placeholder = "⚡Velocmd running...";
+  input.placeholder = "⚡RocketLauncher running...";
   state.results = [];
   input.focus();
 

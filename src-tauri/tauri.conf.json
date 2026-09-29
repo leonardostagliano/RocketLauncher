@@ -1,8 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Velocmd Explorer",
+  "productName": "RocketLauncher",
+  "mainBinaryName": "RocketLauncher",
   "version": "0.1.8",
-  "identifier": "com.yashvardhang.velocmd",
+  "identifier": "it.stagliano.rocketlauncher",
   "build": {
     "frontendDist": "../src"
   },
@@ -10,7 +11,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Velocmd Explorer",
+        "title": "RocketLauncher",
         "label": "main",
         "url": "index.html",
         "width": 800,
@@ -29,8 +30,8 @@
     }
   },
   "bundle": {
-    "publisher": "Yashvardhan Gupta",
-    "copyright": "Copyright © Yashvardhan Gupta",
+    "publisher": "Leonardo Stagliano",
+    "copyright": "Copyright © Yashvardhan Gupta (Velocmd), © 2026 Leonardo Stagliano (RocketLauncher). GPL-3.0.",
     "active": true,
     "targets": "all",
     "icon": [

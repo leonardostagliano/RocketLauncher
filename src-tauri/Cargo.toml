@@ -1,13 +1,10 @@
 [package]
-name = "velocmd-explorer"
+name = "rocket-launcher"
 version = "0.1.8"
-description = "⚡ A lightning-fast system launcher powered by a native Rust indexer."
-authors = ["Yashvardhan Gupta"]
+description = "Launcher e indicizzatore di file per Windows"
+authors = ["Leonardo Stagliano", "Yashvardhan Gupta"]
+license = "GPL-3.0-only"
 edition = "2021"
-
-[lib]
-name = "velo_explorer_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

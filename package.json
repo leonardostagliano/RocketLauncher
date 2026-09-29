@@ -1,15 +1,18 @@
 {
-  "name": "velocmd",
+  "name": "rocketlauncher",
   "private": true,
   "version": "0.1.8",
+  "description": "Launcher e indicizzatore di file per Windows",
+  "license": "GPL-3.0-only",
+  "author": "Leonardo Stagliano",
+  "contributors": [
+    "Yashvardhan Gupta (Velocmd)"
+  ],
   "type": "module",
   "scripts": {
     "tauri": "tauri"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"
-  },
-  "dependencies": {
-    "@tauri-apps/plugin-autostart": "^2.5.1"
   }
 }

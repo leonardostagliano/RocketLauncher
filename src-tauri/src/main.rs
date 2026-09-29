@@ -97,7 +97,7 @@ fn get_config_path(app: &AppHandle) -> std::path::PathBuf {
 fn get_binfile_path(app: &AppHandle) -> std::path::PathBuf {
     let mut path = app.path().app_cache_dir().unwrap_or_default();
     std::fs::create_dir_all(&path).unwrap_or_default();
-    path.push("velocmd_binfile.bin");
+    path.push("index-v1.bin");
     path
 }
 
@@ -312,33 +312,32 @@ async fn search_files(query: String) -> Vec<SearchResult> {
         return active;
     }
 
-    let has_velo_filter = filters.iter().any(|f| {
+    let has_rocket_filter = filters.iter().any(|f| {
         let content = &f[1..];
-        content == "velo" || content == "settings"
+        content == "rocket" || content == "settings"
     });
 
-    if has_velo_filter
+    if has_rocket_filter
         || query_trim.to_lowercase().starts_with("@settings")
         || query_trim.to_lowercase().starts_with("/settings")
-        || query_trim.to_lowercase().starts_with("@velo")
-        || query_trim.to_lowercase().starts_with("/velo")
+        || query_trim.to_lowercase().starts_with("@rocket")
+        || query_trim.to_lowercase().starts_with("/rocket")
     {
-        let all_velo_commands = vec![
-            ("velo:help", "Velo: Help", 201u16),
-            ("velo:settings", "Velo Settings", 200),
-            ("velo:toggle_recents", "Velo: Toggle Recents", 199),
-            ("velo:clear_recents", "Velo: Clear Recents", 198),
-            // ("velo:reset_position", "Velo: Reset Settings", 197),
-            ("velo:refresh", "Velo: Refresh Index", 195),
-            ("velo:show_desktop", "Show Desktop", 194),
-            ("velo:active_tabs", "Active Tabs", 193),
-            ("velo:quit", "Quit Velocmd", 192),
-            ("velo:close_window", "Close Active Tab/Window", 191),
-            ("velo:request_shutdown", "Shutdown", 190),
-            ("velo:media_play", "Media: Play/Pause", 189),
-            ("velo:media_next", "Media: Next Track", 188),
-            ("velo:media_prev", "Media: Previous Track", 187),
-            ("velo:request_restart", "Restart", 180),
+        let all_rocket_commands = vec![
+            ("rocket:help", "RocketLauncher: Help", 201u16),
+            ("rocket:settings", "RocketLauncher Settings", 200),
+            ("rocket:toggle_recents", "RocketLauncher: Toggle Recents", 199),
+            ("rocket:clear_recents", "RocketLauncher: Clear Recents", 198),
+            ("rocket:refresh", "RocketLauncher: Refresh Index", 195),
+            ("rocket:show_desktop", "Show Desktop", 194),
+            ("rocket:active_tabs", "Active Tabs", 193),
+            ("rocket:quit", "Quit RocketLauncher", 192),
+            ("rocket:close_window", "Close Active Tab/Window", 191),
+            ("rocket:request_shutdown", "Shutdown", 190),
+            ("rocket:media_play", "Media: Play/Pause", 189),
+            ("rocket:media_next", "Media: Next Track", 188),
+            ("rocket:media_prev", "Media: Previous Track", 187),
+            ("rocket:request_restart", "Restart", 180),
             ("ms-settings:startupapps", "Startup Apps", 175),
             ("ms-settings:appsfeatures", "Apps & Features (Uninstall)", 174),
             ("ms-settings:sound", "Sound Settings (Volume)", 170),
@@ -346,7 +345,7 @@ async fn search_files(query: String) -> Vec<SearchResult> {
             ("ms-settings:windowsupdate", "Windows Update", 150),
         ];
 
-        let settings_results: Vec<SearchResult> = all_velo_commands
+        let settings_results: Vec<SearchResult> = all_rocket_commands
             .into_iter()
             .filter(|(_, name, _)| {
                 if search_text.is_empty() {
@@ -428,7 +427,7 @@ async fn search_files(query: String) -> Vec<SearchResult> {
         && !has_web_filter
         && !filters.iter().any(|f| {
             let c = &f[1..];
-            c == "velo" || c == "settings" || c == "pc" || c == "thispc" || c == "computer"
+            c == "rocket" || c == "settings" || c == "pc" || c == "thispc" || c == "computer"
                 || c == "tabs" || c == "active" || c == "window" || c == "windows"
                 || c == "app" || c == "apps" || c == "folder" || c == "folders"
                 || c == "file" || c == "files" || c == "drive" || c == "drives"
@@ -459,7 +458,7 @@ async fn search_files(query: String) -> Vec<SearchResult> {
             ("https://open.spotify.com", "Spotify", 185),
             ("https://www.amazon.com", "Amazon", 184),
             ("https://www.wikipedia.org", "Wikipedia", 183),
-            ("https://yashvardhang.github.io/Velocmd/", "Velocmd Docs", 182),
+            ("https://github.com/leonardostagliano/RocketLauncher#readme", "RocketLauncher Docs", 182),
             ("https://yashvardhang.dev", "YashvardhanG", 181),
         ];
 
@@ -1048,11 +1047,21 @@ fn get_active_windows() -> Vec<SearchResult> {
     {
         use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
         use windows::Win32::UI::WindowsAndMessaging::{
-            EnumWindows, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
+            EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+            IsWindowVisible,
         };
 
         unsafe extern "system" fn enum_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
             if IsWindowVisible(hwnd).as_bool() {
+                // The launcher's own windows are excluded by process id, so the filter
+                // does not depend on the window title (which is not kept in sync with
+                // document.title and changes with every rename or translation).
+                let mut owner_pid: u32 = 0;
+                GetWindowThreadProcessId(hwnd, Some(&mut owner_pid));
+                if owner_pid == std::process::id() {
+                    return BOOL(1);
+                }
+
                 let len = GetWindowTextLengthW(hwnd);
                 if len > 0 {
                     let mut buf = vec![0u16; (len + 1) as usize];
@@ -1060,7 +1069,7 @@ fn get_active_windows() -> Vec<SearchResult> {
                     let title = String::from_utf16_lossy(&buf[..len as usize]);
                     let title_trimmed = title.trim().to_string();
 
-                    if !title_trimmed.is_empty() && title_trimmed != "Velocmd" {
+                    if !title_trimmed.is_empty() {
                         let list = &mut *(lparam.0 as *mut Vec<(String, isize)>);
                         list.push((title_trimmed, hwnd.0 as isize));
                     }
@@ -1133,7 +1142,25 @@ fn focus_window(app: tauri::AppHandle, hwnd_val: isize) {
     }
 }
 
+// The /nox filter re-runs the search on every keystroke. Detecting Nox Dimmer spawns
+// `tasklist`, so the answer is reused for a few seconds instead of being recomputed
+// for each character typed.
+const NOX_DETECTION_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+static NOX_DETECTION_CACHE: Lazy<Mutex<Option<(Instant, bool)>>> = Lazy::new(|| Mutex::new(None));
+
 fn is_nox_installed() -> bool {
+    let mut cache = NOX_DETECTION_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((checked_at, installed)) = *cache {
+        if checked_at.elapsed() < NOX_DETECTION_TTL {
+            return installed;
+        }
+    }
+    let installed = detect_nox_installed();
+    *cache = Some((Instant::now(), installed));
+    installed
+}
+
+fn detect_nox_installed() -> bool {
     #[cfg(target_os = "windows")]
     {
         if let Ok(output) = std::process::Command::new("tasklist")
@@ -1502,24 +1529,23 @@ fn index_windows_apps(index: &mut Vec<IndexedItem>, arena: &mut String) {
     }
 }
 
-fn index_velo_commands(index: &mut Vec<IndexedItem>, arena: &mut String) {
-    let velo_commands = vec![
-        ("Velo: Help", "velo:help"),
-        ("Velo Settings", "velo:settings"),
-        ("Velo: Toggle Recents", "velo:toggle_recents"),
-        ("Velo: Clear Recents", "velo:clear_recents"),
-        // ("Velo: Reset Position", "velo:reset_position"),
-        ("Velo: Refresh Index", "velo:refresh"),
-        ("Show Desktop", "velo:show_desktop"),
-        ("Active Tabs", "velo:active_tabs"),
-        ("Shutdown", "velo:request_shutdown"),
-        ("Media: Play/Pause", "velo:media_play"),
-        ("Media: Next Track", "velo:media_next"),
-        ("Media: Previous Track", "velo:media_prev"),
-        ("Restart", "velo:request_restart"),
+fn index_rocket_commands(index: &mut Vec<IndexedItem>, arena: &mut String) {
+    let rocket_commands = vec![
+        ("RocketLauncher: Help", "rocket:help"),
+        ("RocketLauncher Settings", "rocket:settings"),
+        ("RocketLauncher: Toggle Recents", "rocket:toggle_recents"),
+        ("RocketLauncher: Clear Recents", "rocket:clear_recents"),
+        ("RocketLauncher: Refresh Index", "rocket:refresh"),
+        ("Show Desktop", "rocket:show_desktop"),
+        ("Active Tabs", "rocket:active_tabs"),
+        ("Shutdown", "rocket:request_shutdown"),
+        ("Media: Play/Pause", "rocket:media_play"),
+        ("Media: Next Track", "rocket:media_next"),
+        ("Media: Previous Track", "rocket:media_prev"),
+        ("Restart", "rocket:request_restart"),
     ];
 
-    for (name_str, path_str) in velo_commands {
+    for (name_str, path_str) in rocket_commands {
         if path_str.len() > u16::MAX as usize || name_str.len() > u16::MAX as usize {
             continue;
         }
@@ -1572,7 +1598,7 @@ fn build_index_internal(app: &tauri::AppHandle, silent: bool) {
     let mut new_arena = String::with_capacity(75_000_000);
     
     index_system_settings(&mut new_items, &mut new_arena);
-    index_velo_commands(&mut new_items, &mut new_arena);
+    index_rocket_commands(&mut new_items, &mut new_arena);
     index_windows_apps(&mut new_items, &mut new_arena);
 
     let mut app_paths = Vec::new();
@@ -1730,11 +1756,13 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
         }))
-        .plugin(tauri_plugin_autostart::Builder::new().build())
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec![]),
-        ))
+        // A single registration with an explicit name: the HKCU Run value is called
+        // "RocketLauncher" whatever package_info().name resolves to.
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name("RocketLauncher")
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -1821,6 +1849,7 @@ fn main() {
 
             let _tray = TrayIconBuilder::new()
                 .icon(tray_icon)
+                .tooltip("RocketLauncher")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => {
