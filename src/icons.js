@@ -122,15 +122,15 @@ export function iconNameFor(path, kind) {
   if (raw.startsWith("ms-settings:")) return "sliders-horizontal";
 
   const p = raw.replace(/\//g, "\\");
-  const isUserProfile = /^c:\users\[^\]+\[^\]+$/.test(p) || /^c:\users\[^\]+$/.test(p) ||
-    /^c:\documents and settings\[^\]+\[^\]+$/.test(p);
+  const isUserProfile = /^c:\\users\\[^\\]+\\[^\\]+$/.test(p) || /^c:\\users\\[^\\]+$/.test(p) ||
+    /^c:\\documents and settings\\[^\\]+\\[^\\]+$/.test(p);
   if (isUserProfile) {
-    if (p.endsWith("\downloads")) return "folder-down";
-    if (p.endsWith("\pictures") || p.endsWith("\gallery")) return "image";
-    if (p.endsWith("\documents")) return "file-text";
-    if (p.endsWith("\music")) return "music";
-    if (p.endsWith("\videos")) return "clapperboard";
-    if (p.endsWith("\desktop")) return "monitor";
+    if (p.endsWith("\\downloads")) return "folder-down";
+    if (p.endsWith("\\pictures") || p.endsWith("\\gallery")) return "image";
+    if (p.endsWith("\\documents")) return "file-text";
+    if (p.endsWith("\\music")) return "music";
+    if (p.endsWith("\\videos")) return "clapperboard";
+    if (p.endsWith("\\desktop")) return "monitor";
   }
   if (p.includes("recyclebinfolder")) return "trash";
   if (p.includes("20d04fe0-3aea-1069-a2d8-08002b30309d")) return "monitor"; // Questo PC

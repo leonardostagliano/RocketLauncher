@@ -1,17 +1,39 @@
 import { HELP_URL, LATEST_RELEASE_URL, REPOSITORY_URL, findUpdate } from "./update-source.js";
 import { iconElement, iconNameFor } from "./icons.js";
+import {
+  BINDING_PROBLEM_TEXT,
+  DEFAULT_BINDINGS,
+  DEFAULT_SHORTCUT,
+  IN_APP_ACTIONS,
+  PRESET_SHORTCUTS,
+  SHORTCUT_PROBLEM_TEXT,
+  acceleratorFromKeyEvent,
+  actionLabel as keyActionLabel,
+  actionUsingAccelerator,
+  bindingFromKeyEvent,
+  bindingKeys,
+  bindingOverrides,
+  bindingProblem,
+  formatAccelerator,
+  formatBinding,
+  formatPendingModifiers,
+  globalShortcutProblem,
+  isAltGraph,
+  matchesBinding,
+  normalizeAccelerator,
+  resolveBindings
+} from "./shortcuts.js";
 const { invoke } = window.__TAURI__.core;
-const { getCurrentWindow } = window.__TAURI__.window;
 const { listen } = window.__TAURI__.event;
 
 // ---------------------------------------------------------------------------
-// Interface text (Italian). Everything the user reads is defined here; the logic
-// compares keys, kinds and paths, never the text on screen.
+// Interface text (Italian). Everything the user reads is defined here, except the key names and the messages about
+// shortcuts, which are in shortcuts.js; the logic compares keys, kinds and paths, never the text on screen.
 // ---------------------------------------------------------------------------
 
 const PLACEHOLDERS = {
   default: "Cerca app, file, cartelle e comandi",
-  private: "Modalità privata: le ricerche web si aprono in incognito",
+  private: "Modalità privata: ricerche web in incognito",
   update: "È disponibile una nuova versione di RocketLauncher",
   indexing: "Indicizzazione dei file in corso…",
   refreshing: "Aggiornamento dell'indice in corso…"
@@ -30,23 +52,30 @@ const CLEAR_RECENTS_LABELS = {
   done: "Recenti svuotati"
 };
 
+// Keys are called "tasti di scelta rapida", as in Windows; one combination is a "combinazione". The global shortcut
+// shows RocketLauncher from any app; the other keys work inside it.
 const SHORTCUT_TEXT = {
-  applying: "Aggiornamento…",
+  hint: "Apre RocketLauncher da qualsiasi app",
+  // Not "Applicazione…": alone it reads as "app".
+  applying: "Verifica in corso…",
   checking: "Verifica disponibilità…",
+  recording: "Premi la combinazione…",
+  recordingHint: "Premi i tasti, Esc per annullare",
   unavailable: "Non disponibile: già in uso da un'altra app",
-  updated: "Scelta rapida aggiornata",
-  rejected: "Scelta rapida già in uso o non valida",
-  failed: "Impossibile cambiare la scelta rapida"
-};
-
-// Key names shown for the global shortcut. The stored accelerator (for example
-// "Super+Shift+.") never changes, only the way it is displayed.
-const SHORTCUT_KEY_LABELS = {
-  Super: "Win",
-  CommandOrControl: "Ctrl",
-  Control: "Ctrl",
-  Shift: "Maiusc",
-  Space: "Spazio"
+  reservedPreset: "Non disponibile: riservata a Windows",
+  activePreset: "Combinazione in uso",
+  defaultPreset: "Predefinita",
+  updated: "Tasti di scelta rapida aggiornati",
+  rejected: "Combinazione già in uso o non valida",
+  failed: "Impossibile cambiare la combinazione",
+  bindingSaved: "Aggiornato",
+  bindingRestored: "Ripristinato",
+  bindingFailed: "Impossibile salvare",
+  bindingsReset: "Ripristinati",
+  restoreTitle: (defaultKeys) => `Ripristina il tasto predefinito (${defaultKeys})`,
+  recorderTitle: "Clic o Invio per registrare una nuova combinazione",
+  // At start-up another app held the saved combination: a preset stands in until the next start.
+  standIn: (preferred, current) => `${preferred} era occupata: per ora ${current}`
 };
 
 const RESULT_TEXT = {
@@ -58,21 +87,23 @@ const RESULT_TEXT = {
   searchPrivate: "Cerca in incognito",
   searchPrivateWith: (engine) => `Cerca con ${engine} in incognito`,
   noResults: (query) => `Nessun risultato per “${query}”`,
-  noResultsWithFilters: "Nessun risultato con questi filtri. Premi Backspace per rimuovere l'ultimo.",
+  noResultsWithFilters: (key) => `Nessun risultato con questi filtri. Premi ${key} per rimuovere l'ultimo.`,
   recentsEmptyTitle: "Qui compariranno gli elementi aperti di recente",
-  recentsEmptyHint: "Puoi nasconderli nelle impostazioni (Tab)",
-  refreshingTitle: "Aggiornamento dell'indice dei file…",
+  recentsEmptyHint: (key) => `Puoi nasconderli nelle impostazioni (${key})`,
+  refreshingTitle: "Aggiornamento dell'indice in corso…",
   refreshingHint: "Richiede qualche istante",
   indexingTitle: "Indicizzazione dei file in corso…",
   indexingHint: "All'avvio richiede qualche istante",
-  shutdownConfirm: "Sì, spegni il PC adesso",
-  restartConfirm: "Sì, riavvia il PC adesso",
+  searchingTitle: "Ricerca in corso…",
+  shutdownConfirm: "Sì, arresta il sistema",
+  restartConfirm: "Sì, riavvia il sistema",
   powerCancel: "No, annulla",
   shutdownDetail: "Chiude tutte le app e spegne il computer",
   restartDetail: "Chiude tutte le app e riavvia il computer",
   cancelDetail: "Torna alla ricerca",
   removeFilter: "Rimuovi filtro",
-  drive: (letter) => `Unità ${letter}`
+  // get_available_drives answers with the root ("C:\"); the label shows only the letter and the colon.
+  drive: (root) => `Unità ${root.slice(0, 2)}`
 };
 
 // Second line of a result row, by kind and by the scheme of built-in paths.
@@ -126,9 +157,12 @@ const KEY_HINT_TEXT = {
   move: "Sposta",
   activate: "Attiva",
   backToSearch: "Torna alla ricerca",
-  confirm: "Conferma",
-  close: "Chiudi"
+  back: "Indietro",
+  cancel: "Annulla"
 };
+
+// Title of the settings button; the key is the one of "Apri e chiudi le impostazioni".
+const SETTINGS_BUTTON_TITLE = (key) => `Impostazioni (${key})`;
 
 const RECENTS_TITLE = "Recenti";
 
@@ -138,6 +172,8 @@ const NUMBER_FORMAT = new Intl.NumberFormat("it-IT", { minimumFractionDigits: 1,
 const SHUTDOWN_NOW_PATH = "cmd:shutdown /s /t 0";
 const RESTART_NOW_PATH = "cmd:shutdown /r /t 0";
 const CANCEL_POWER_PATH = "rocket:cancel_power";
+// Position of "No, annulla" in the confirmation, the row selected when it appears.
+const POWER_CANCEL_INDEX = 1;
 
 // ---------------------------------------------------------------------------
 // Filters and search intents. Chips are "@word" or "/word" ("!cmd" too); the
@@ -190,9 +226,14 @@ const WEB_SEARCH_URLS = {
   duckduckgo: "https://duckduckgo.com/?q="
 };
 
-// A query whose first word is one of these is offered as a web search (accents are ignored,
-// so "perche" and "perché" both count).
-const QUESTION_WORDS = new Set(["come", "cosa", "perche", "quando", "chi", "dove", "how", "what", "why", "when", "who"]);
+// A query whose first word is one of these is offered as a web search. Accents are ignored and the
+// typographic apostrophe is straightened, so "perche" and "perché", "cos'è" and "cos’è" all count.
+// Bare "che" and "cose" are left out: they are too common as the start of a file name.
+const QUESTION_WORDS = new Set([
+  "come", "com'e", "cosa", "cos'e", "perche", "quando", "chi", "dove",
+  "qual", "quale", "quali", "quanto", "quanta", "quanti", "quante",
+  "how", "what", "why", "when", "who"
+]);
 
 // File names, window titles of other apps and typed text are always set as text (textContent),
 // never parsed as HTML: a page title such as "<img onerror=…>" shown under /finestre must not run
@@ -354,18 +395,32 @@ function infoRow(iconName, title, subtitle, spinning = false) {
   return row;
 }
 
+// The row shown while the index is built at start-up or rebuilt on request, by placeholder key.
+const INDEX_STATUS_ROWS = {
+  indexing: () => infoRow("loader-circle", RESULT_TEXT.indexingTitle, RESULT_TEXT.indexingHint, true),
+  refreshing: () => infoRow("loader-circle", RESULT_TEXT.refreshingTitle, RESULT_TEXT.refreshingHint, true)
+};
+
 const input = document.getElementById("search-input");
 const container = document.getElementById("container");
 const resultsContainer = document.getElementById("results-container");
 const resultsList = document.getElementById("results");
 const settingsBtn = document.getElementById("settings-btn");
 const settingsPanel = document.getElementById("settings-panel");
+// The settings show one view at a time: the two cards, or the page of every key ("Tasti di scelta rapida").
+const settingsMainView = document.getElementById("settings-main");
+const keysView = document.getElementById("keys-view");
 const recentsToggle = document.getElementById("show-recents-toggle");
 const clearRecentsBtn = document.getElementById("clear-recents-btn");
 const resetPosBtn = document.getElementById("reset-pos-btn");
+// The global shortcut recorder of the main view; the keys page has a second one (both are [data-recorder="global"]).
 const shortcutDisplay = document.getElementById("shortcut-display");
-const shortcutDropdown = document.getElementById("shortcut-dropdown");
-const shortcutMsg = document.getElementById("shortcut-msg");
+const keysOpenBtn = document.getElementById("keys-open-btn");
+const keysBackBtn = document.getElementById("keys-back-btn");
+const keysResetBtn = document.getElementById("keys-reset-btn");
+const keysGlobalRecorder = document.getElementById("keys-global-recorder");
+const presetList = document.getElementById("preset-list");
+const actionList = document.getElementById("action-list");
 const startupToggle = document.getElementById("startup-toggle");
 const analyticsToggle = document.getElementById("analytics-toggle");
 const updateBtn = document.getElementById("update-btn");
@@ -373,6 +428,7 @@ const memoryDisplay = document.getElementById("memory-usage");
 const helpBtn = document.getElementById("help-btn");
 const keyHints = document.getElementById("key-hints");
 const licenseLink = document.getElementById("license-link");
+const legalLinks = [...document.querySelectorAll(".legal a")];
 const searchWrapper = document.querySelector(".search-wrapper");
 
 // Window material chosen by main.rs (Mica, Acrylic or none) and who rounds the corners: styles.css
@@ -426,7 +482,6 @@ appVersion.then((version) => {
 });
 
 let settingsIndex = -1;
-let dropdownIndex = -1;
 let isAllSelected = false;
 let currentSearchId = 0;
 let lastRenderedSearchId = 0;
@@ -440,16 +495,15 @@ let state = {
   activeFilters: []
 };
 
-const PRESET_SHORTCUTS = [
-  "Super+Shift+.",
-  "Alt+Space",
-  "Super+Space",
-  "Ctrl+Space",
-  "Ctrl+Shift+Space",
-  "Super+S",
-  "Alt+S",
-  "Super+/"
-];
+// Keys of the in-app actions, from settings.json through resolveBindings(); the defaults until main.rs answers.
+let bindings = { ...DEFAULT_BINDINGS };
+// The global shortcut in use, as main.rs registered it.
+let currentShortcut = "";
+// The character the user's keyboard layout gives each punctuation key (main.rs, keyboard_layout_labels): "tokens" for
+// the global shortcut (by virtual key), "codes" for the in-app keys (by physical key). Empty: US names.
+let layoutLabels = { tokens: {}, codes: {} };
+// The recorder waiting for a combination, if any: { kind: "global" | "action", action, element, busy }.
+let recording = null;
 
 // Recents are reopened with a single Enter, so only rows that are safe and meaningful
 // to open again are stored. Power confirmations, quit, cancel, filter suggestions,
@@ -554,20 +608,36 @@ async function updateMemoryUsage() {
 
 setInterval(updateMemoryUsage, 2000);
 
-// Every control of the settings panel, in reading order (left card, then right card). The arrow keys
-// move between them by position on screen (moveSettingsFocus), so the order only decides where the
-// first press lands.
+function isKeysViewOpen() {
+  return !settingsPanel.classList.contains("hidden") && !keysView.classList.contains("hidden");
+}
+
+// Every control of the settings view on screen, in reading order (main view: left card, right card, then the links
+// of the licence notice; keys page: back, the global shortcut and its quick picks, then the in-app keys). The arrow
+// keys move between them by position on screen (moveSettingsFocus), so the order only decides where the first press
+// lands.
 function getSettingsFocusables() {
-  const base = [
-    shortcutDisplay,
-    recentsToggle.parentElement,
-    startupToggle.parentElement,
-    analyticsToggle.parentElement,
-    updateBtn,
-    clearRecentsBtn,
-    resetPosBtn,
-    helpBtn
-  ];
+  const base = isKeysViewOpen()
+    ? [
+      keysBackBtn,
+      keysGlobalRecorder,
+      ...presetList.querySelectorAll(".preset-option"),
+      keysResetBtn,
+      ...actionList.querySelectorAll(".key-recorder"),
+      ...actionList.querySelectorAll(".key-restore:not([hidden])")
+    ]
+    : [
+      shortcutDisplay,
+      keysOpenBtn,
+      recentsToggle.parentElement,
+      startupToggle.parentElement,
+      analyticsToggle.parentElement,
+      updateBtn,
+      clearRecentsBtn,
+      resetPosBtn,
+      helpBtn,
+      ...legalLinks
+    ];
   return base.filter(node => node !== null);
 }
 
@@ -611,26 +681,13 @@ function moveSettingsFocus(dx, dy) {
 }
 
 function renderSettingsFocus() {
-  const items = getSettingsFocusables();
-  items.forEach((item, idx) => {
-    if (idx === settingsIndex) {
-      item.classList.add("selected");
-    } else {
-      item.classList.remove("selected");
-    }
-  });
-}
-
-function renderDropdownFocus() {
-  const options = document.querySelectorAll(".shortcut-option");
-  options.forEach((opt, idx) => {
-    if (idx === dropdownIndex) {
-      opt.classList.add("selected");
-      opt.scrollIntoView({ block: "nearest" });
-    } else {
-      opt.classList.remove("selected");
-    }
-  });
+  settingsPanel.querySelectorAll(".selected").forEach((node) => node.classList.remove("selected"));
+  const item = getSettingsFocusables()[settingsIndex];
+  if (item) {
+    item.classList.add("selected");
+    item.scrollIntoView({ block: "nearest" });
+  }
+  renderKeyHints();
 }
 
 invoke("set_recents_state", { show: state.showRecents });
@@ -639,28 +696,74 @@ invoke("set_recents_state", { show: state.showRecents });
 // collapsed shows only the search bar.
 const WINDOW_MIN_HEIGHT = 56;
 const WINDOW_MAX_HEIGHT = 400;
+// Height of the action bar at the bottom (--foot-h in styles.css).
+const FOOTER_HEIGHT = 40;
+// Tallest the settings may make the window, for two-line messages on the keys page; beyond it the panel scrolls.
+const SETTINGS_MAX_HEIGHT = 460;
+
+// Open settings take the height of the view on screen (the two cards and the licence line, or the keys page), with
+// the search bar above and the action bar below: no empty glass under the last line. The children of a view keep
+// their own height whatever the window height is, so this can be measured before resizing.
+function settingsWindowHeight() {
+  const view = isKeysViewOpen() ? keysView : settingsMainView;
+  const panelStyle = getComputedStyle(settingsPanel);
+  const viewStyle = getComputedStyle(view);
+  const children = [...view.children].filter((child) => !child.classList.contains("hidden"));
+  const content = children.reduce((sum, child) => sum + child.offsetHeight, 0)
+    + (parseFloat(viewStyle.rowGap) || 0) * Math.max(0, children.length - 1)
+    + parseFloat(panelStyle.paddingTop) + parseFloat(panelStyle.paddingBottom);
+  return Math.min(SETTINGS_MAX_HEIGHT, Math.ceil(WINDOW_MIN_HEIGHT + content + FOOTER_HEIGHT));
+}
+
+async function fitSettingsWindow() {
+  if (settingsPanel.classList.contains("hidden")) return;
+  const height = settingsWindowHeight();
+  if (height !== lastWindowHeight) {
+    lastWindowHeight = height;
+    await invoke("resize_window", { height });
+  }
+}
+
+// Shows the page of every key (from the arrow button next to the global shortcut) or goes back to the two cards.
+// From the keyboard the cursor lands where it makes sense: on the back button, or back on the arrow button.
+async function showKeysView(show, { fromKeyboard = false } = {}) {
+  if (show === isKeysViewOpen()) return;
+  cancelRecording();
+  settingsMainView.classList.toggle("hidden", show);
+  keysView.classList.toggle("hidden", !show);
+  const focusables = getSettingsFocusables();
+  settingsIndex = fromKeyboard ? focusables.indexOf(show ? keysBackBtn : keysOpenBtn) : -1;
+  renderSettingsFocus();
+  if (show) renderPresets();
+  await fitSettingsWindow();
+}
 
 async function toggleSettings() {
   const isOpening = settingsPanel.classList.contains("hidden");
 
   if (isOpening) {
-    await invoke("resize_window", { height: WINDOW_MAX_HEIGHT });
-    lastWindowHeight = WINDOW_MAX_HEIGHT;
-
     settingsIndex = -1;
+    settingsMainView.classList.remove("hidden");
+    keysView.classList.add("hidden");
     renderSettingsFocus();
+    refreshLayoutLabels();
 
     settingsPanel.classList.remove("hidden");
     settingsBtn.classList.add("active");
     resultsContainer.classList.add("hidden");
+    updateContainerMinimalState();
 
     if (!state.activeFilters.includes(SETTINGS_CHIP)) {
       state.activeFilters.push(SETTINGS_CHIP);
       renderChips();
     }
+    await fitSettingsWindow();
   } else {
+    cancelRecording();
     settingsPanel.classList.add("hidden");
-    getSettingsFocusables().forEach(el => el.classList.remove("selected"));
+    settingsMainView.classList.remove("hidden");
+    keysView.classList.add("hidden");
+    settingsPanel.querySelectorAll(".selected").forEach((node) => node.classList.remove("selected"));
     settingsBtn.classList.remove("active");
 
     state.activeFilters = state.activeFilters.filter(f => f !== SETTINGS_CHIP);
@@ -747,11 +850,10 @@ resetPosBtn.onclick = async () => {
     console.error("Reset autostart error:", err);
   }
 
-  const defaultShortcut = PRESET_SHORTCUTS[0];
-  await applyShortcut(defaultShortcut);
+  await saveBindings({ ...DEFAULT_BINDINGS });
+  await applyShortcut(DEFAULT_SHORTCUT);
 
-  await invoke("resize_window", { height: WINDOW_MAX_HEIGHT });
-  lastWindowHeight = WINDOW_MAX_HEIGHT;
+  await fitSettingsWindow();
 };
 
 function setUpdateButton(text, variant) {
@@ -901,6 +1003,16 @@ async function render() {
     return;
   }
 
+  // While the index is built or rebuilt the search box is disabled: whenever the list is shown (the window
+  // coming back with the recents on, the settings closing) it keeps saying so instead of listing the recents.
+  const indexStatusRow = INDEX_STATUS_ROWS[placeholderKey];
+  if (input.disabled && indexStatusRow && settingsPanel.classList.contains("hidden")) {
+    resultsList.replaceChildren(indexStatusRow());
+    resultsContainer.classList.remove("hidden");
+    updateContainerMinimalState();
+    return;
+  }
+
   resultsList.replaceChildren();
   let items = [];
 
@@ -988,7 +1100,9 @@ async function render() {
     noResults.setAttribute("role", "presentation");
     const tile = el("span", "empty-icon");
     tile.appendChild(iconElement("search-x"));
-    const message = hasChips && isInputEmpty ? RESULT_TEXT.noResultsWithFilters : RESULT_TEXT.noResults(rawInput);
+    const message = hasChips && isInputEmpty
+      ? RESULT_TEXT.noResultsWithFilters(bindingText("removeChip"))
+      : RESULT_TEXT.noResults(rawInput);
     noResults.append(tile, el("span", "empty-title", message));
     resultsList.appendChild(noResults);
     updateContainerMinimalState();
@@ -1048,7 +1162,8 @@ async function render() {
   let showedEmptyRecentMessage = false;
 
   if (isInputEmpty && state.showRecents && items.length === 0 && !hasChips) {
-    resultsList.appendChild(infoRow("rotate-ccw-clock", RESULT_TEXT.recentsEmptyTitle, RESULT_TEXT.recentsEmptyHint));
+    resultsList.appendChild(infoRow("rotate-ccw-clock", RESULT_TEXT.recentsEmptyTitle,
+      RESULT_TEXT.recentsEmptyHint(bindingText("settings"))));
     showedEmptyRecentMessage = true;
   }
 
@@ -1072,7 +1187,25 @@ function updateContainerMinimalState() {
   } else {
     container.classList.remove("minimal-state");
   }
+  updateAriaState();
   renderKeyHints();
+}
+
+// For screen readers the search box is a combobox whose popup is the result list: the focus never leaves
+// the box, so the selected row is announced as its active descendant.
+function updateAriaState() {
+  const rows = resultsList.querySelectorAll(".result-item");
+  rows.forEach((row, index) => {
+    row.id = `result-${index}`;
+  });
+  const isListShown = !resultsContainer.classList.contains("hidden") && rows.length > 0;
+  input.setAttribute("aria-expanded", String(isListShown));
+  const selected = rows[state.selectedIndex];
+  if (isListShown && selected) {
+    input.setAttribute("aria-activedescendant", selected.id);
+  } else {
+    input.removeAttribute("aria-activedescendant");
+  }
 }
 
 function renderStyles() {
@@ -1083,33 +1216,48 @@ function renderStyles() {
     item.setAttribute("aria-selected", String(isSelected));
     if (isSelected) item.scrollIntoView({ block: "nearest" });
   });
+  updateAriaState();
   renderKeyHints();
 }
 
+// The keys of an in-app action as the action bar shows them (Enter as ↵).
+function hintKeys(actionId) {
+  return bindingKeys(bindings[actionId], layoutLabels.codes, { compact: true });
+}
+
+// The keys of an in-app action in running text ("Tab", "Ctrl + Invio").
+function bindingText(actionId) {
+  return formatBinding(bindings[actionId], layoutLabels.codes);
+}
+
 // The action bar at the bottom: brand on the left, the keys that work right now on the right. The
-// Enter key is filled with the accent and named after what it does on the selected row.
+// Enter key is filled with the accent and named after what it does on the selected row. The keys of the
+// actions are the user's own (Tasti di scelta rapida); arrows, Enter and Esc in the settings are fixed.
 function renderKeyHints() {
   if (!keyHints) return;
   const hints = [];
   const hint = (keys, label, primary = false) => hints.push({ keys, label, primary });
   const escLabel = input.value.length > 0 || state.activeFilters.length > 0 ? KEY_HINT_TEXT.clear : KEY_HINT_TEXT.hide;
 
-  if (!shortcutDropdown.classList.contains("hidden")) {
-    hint(["↑", "↓"], KEY_HINT_TEXT.choose);
-    hint(["↵"], KEY_HINT_TEXT.confirm, true);
-    hint(["Esc"], KEY_HINT_TEXT.close);
+  if (recording) {
+    hint(["Esc"], KEY_HINT_TEXT.cancel);
+  } else if (isKeysViewOpen()) {
+    hint(["↑", "↓", "←", "→"], KEY_HINT_TEXT.move);
+    hint(["↵"], KEY_HINT_TEXT.activate, true);
+    hint(["Esc"], KEY_HINT_TEXT.back);
+    hint(hintKeys("settings"), KEY_HINT_TEXT.backToSearch);
   } else if (!settingsPanel.classList.contains("hidden")) {
     hint(["↑", "↓", "←", "→"], KEY_HINT_TEXT.move);
     hint(["↵"], KEY_HINT_TEXT.activate, true);
-    hint(["Tab"], KEY_HINT_TEXT.backToSearch);
+    hint(hintKeys("settings"), KEY_HINT_TEXT.backToSearch);
   } else {
     const rows = document.querySelectorAll(".result-item");
     const selected = rows[state.selectedIndex];
     if (rows.length > 1) hint(["↑", "↓"], KEY_HINT_TEXT.choose);
     if (selected && selected.dataset.action) hint(["↵"], selected.dataset.action, true);
-    if (selected && selected.dataset.reveal !== undefined) hint(["Ctrl", "↵"], KEY_HINT_TEXT.revealInExplorer);
-    hint(["Tab"], KEY_HINT_TEXT.settings);
-    hint(["Esc"], escLabel);
+    if (selected && selected.dataset.reveal !== undefined) hint(hintKeys("reveal"), KEY_HINT_TEXT.revealInExplorer);
+    hint(hintKeys("settings"), KEY_HINT_TEXT.settings);
+    hint(hintKeys("clear"), escLabel);
   }
 
   keyHints.replaceChildren(...hints.map(({ keys, label, primary }) => {
@@ -1157,7 +1305,8 @@ async function openFile(path, kind, name) {
       { name: RESULT_TEXT.powerCancel, detail: RESULT_TEXT.cancelDetail, path: CANCEL_POWER_PATH, kind: "command", score: 9 }
     ];
 
-    state.selectedIndex = 0;
+    // "No, annulla" is preselected: a second Enter never shuts the computer down by accident.
+    state.selectedIndex = POWER_CANCEL_INDEX;
     render();
     return;
   }
@@ -1171,7 +1320,7 @@ async function openFile(path, kind, name) {
       { name: RESULT_TEXT.restartConfirm, detail: RESULT_TEXT.restartDetail, path: RESTART_NOW_PATH, kind: "command", score: 10 },
       { name: RESULT_TEXT.powerCancel, detail: RESULT_TEXT.cancelDetail, path: CANCEL_POWER_PATH, kind: "command", score: 9 }
     ];
-    state.selectedIndex = 0;
+    state.selectedIndex = POWER_CANCEL_INDEX;
     render();
     return;
   }
@@ -1299,7 +1448,7 @@ async function openFile(path, kind, name) {
     renderChips();
     setPlaceholder("refreshing");
 
-    resultsList.replaceChildren(infoRow("loader-circle", RESULT_TEXT.refreshingTitle, RESULT_TEXT.refreshingHint, true));
+    resultsList.replaceChildren(INDEX_STATUS_ROWS.refreshing());
     resultsContainer.classList.remove("hidden");
     updateContainerMinimalState();
     await invoke("trigger_index_refresh");
@@ -1463,14 +1612,31 @@ input.addEventListener("input", async (e) => {
   }
 
   if (resultsContainer.classList.contains("hidden") || (!state.showRecents && state.results.length === 0)) {
-    invoke("resize_window", { height: WINDOW_MAX_HEIGHT });
-    lastWindowHeight = WINDOW_MAX_HEIGHT;
+    if (lastWindowHeight !== WINDOW_MAX_HEIGHT) {
+      invoke("resize_window", { height: WINDOW_MAX_HEIGHT });
+      lastWindowHeight = WINDOW_MAX_HEIGHT;
+    }
     resultsContainer.classList.remove("hidden");
   }
+
+  // The list can open before the first answer arrives (scanning a large index takes a moment): it says that
+  // the search is running instead of showing empty glass. Rows already on screen stay until the new ones
+  // replace them, and a quick answer never flashes the message over a "no results" line.
+  const showSearching = () => {
+    if (thisSearchId !== currentSearchId || lastRenderedSearchId >= thisSearchId) return;
+    if (resultsList.querySelector(".result-item")) return;
+    const typed = val.trim();
+    const subject = typed.length > 0 ? `“${typed}”` : state.activeFilters.join(" ");
+    resultsList.replaceChildren(infoRow("loader-circle", RESULT_TEXT.searchingTitle, subject, true));
+    updateContainerMinimalState();
+  };
+  if (resultsList.childElementCount === 0) showSearching();
+  const searchingTimer = setTimeout(showSearching, 150);
 
   searchLoader.classList.remove("hidden");
   const searchQuery = [...state.activeFilters, val].join(" ").trim();
   const results = await invoke("search_files", { query: searchQuery || "/p" });
+  clearTimeout(searchingTimer);
 
   if (thisSearchId < lastRenderedSearchId) {
     return;
@@ -1487,15 +1653,83 @@ input.addEventListener("input", async (e) => {
   render();
 });
 
-document.addEventListener('keydown', async (e) => {
-  if (['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(e.key)) {
+// Closes the settings without the resize and re-render that toggleSettings() does (the caller does them).
+function hideSettingsPanel() {
+  cancelRecording();
+  settingsPanel.classList.add("hidden");
+  settingsMainView.classList.remove("hidden");
+  keysView.classList.add("hidden");
+  settingsPanel.querySelectorAll(".selected").forEach((node) => node.classList.remove("selected"));
+  settingsBtn.classList.remove("active");
+}
+
+// "Azzera la ricerca o nascondi" (Esc by default): clears text and chips and closes the settings; with
+// everything already empty it hides the bar.
+async function clearOrHide() {
+  deselectChips();
+  const isSettingsHidden = settingsPanel.classList.contains("hidden");
+  if (input.value === "" && isSettingsHidden && state.activeFilters.length === 0) {
+    await invoke("hide_window");
     return;
   }
 
-  if (isAllSelected && e.key !== "Backspace" && !(e.ctrlKey && e.key.toLowerCase() === 'a')) {
-    const isPrintable = e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey;
-    const isPasteOrCut = e.ctrlKey && (e.key.toLowerCase() === 'v' || e.key.toLowerCase() === 'x');
-    const isCopy = e.ctrlKey && e.key.toLowerCase() === 'c';
+  input.value = "";
+  state.activeFilters = [];
+  renderChips();
+  state.results = [];
+  hideSettingsPanel();
+
+  render();
+  input.focus();
+
+  if (state.showRecents) {
+    await invoke("resize_window", { height: WINDOW_MAX_HEIGHT });
+    lastWindowHeight = WINDOW_MAX_HEIGHT;
+  } else {
+    await invoke("reset_window");
+    lastWindowHeight = WINDOW_MIN_HEIGHT;
+  }
+}
+
+// Enter or Space on the control under the settings cursor.
+function activateSettingsItem(item) {
+  if (item === keysOpenBtn) {
+    showKeysView(true, { fromKeyboard: true });
+  } else if (item === keysBackBtn) {
+    showKeysView(false, { fromKeyboard: true });
+  } else if (item.classList.contains("toggle-switch-container")) {
+    const checkbox = item.querySelector('input[type="checkbox"]');
+    if (checkbox) {
+      checkbox.checked = !checkbox.checked;
+      checkbox.dispatchEvent(new Event('change'));
+    }
+  } else {
+    item.click();
+  }
+}
+
+// The keys of the in-app actions are the user's own (shortcuts.js, matchesBinding); the arrows and Enter are fixed,
+// and Esc always goes back from the keys page or cancels a recording. Keys typed with AltGr (Ctrl + Alt on Windows:
+// @ # [ ] € on an Italian keyboard) never match an action and are never stopped, so they reach the search box.
+document.addEventListener('keydown', async (e) => {
+  if (recording) {
+    handleRecorderKey(e);
+    return;
+  }
+
+  if (['Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'CapsLock'].includes(e.key)) {
+    return;
+  }
+
+  const altGraph = isAltGraph(e);
+  const isSelectAll = matchesBinding(e, bindings.selectAll);
+  const deletesSelection = (e.key === "Backspace" || e.key === "Delete") && !e.ctrlKey && !e.altKey && !e.metaKey;
+
+  if (isAllSelected && !deletesSelection && !isSelectAll) {
+    const lowerKey = e.key.toLowerCase();
+    const isPrintable = e.key.length === 1 && (altGraph || (!e.ctrlKey && !e.altKey && !e.metaKey));
+    const isPasteOrCut = e.ctrlKey && !altGraph && (lowerKey === 'v' || lowerKey === 'x');
+    const isCopy = e.ctrlKey && !altGraph && lowerKey === 'c';
 
     if (isCopy) {
       return;
@@ -1512,7 +1746,7 @@ document.addEventListener('keydown', async (e) => {
     deselectChips();
   }
 
-  if (e.ctrlKey && e.key.toLowerCase() === 'a') {
+  if (isSelectAll) {
     e.preventDefault();
     if (input.value.length > 0 || state.activeFilters.length > 0) {
       selectAllChips();
@@ -1520,92 +1754,53 @@ document.addEventListener('keydown', async (e) => {
     return;
   }
 
-  if (e.key === "Escape") {
+  const isSettingsOpen = !settingsPanel.classList.contains("hidden");
+
+  // Esc on the keys page goes back to the two cards; in the settings it always closes them.
+  if (e.key === "Escape" && isKeysViewOpen()) {
     e.preventDefault();
+    showKeysView(false, { fromKeyboard: true });
+    return;
+  }
+
+  if (matchesBinding(e, bindings.clear) || (e.key === "Escape" && isSettingsOpen)) {
+    e.preventDefault();
+    await clearOrHide();
+    return;
+  }
+
+  if (deletesSelection && isAllSelected) {
+    e.preventDefault();
+    state.activeFilters = [];
+    input.value = "";
+    renderChips();
     deselectChips();
 
-    const isInputEmpty = input.value === "";
-    const isSettingsHidden = settingsPanel.classList.contains("hidden");
-    const isDropdownHidden = shortcutDropdown.classList.contains("hidden");
-    const areChipsEmpty = state.activeFilters.length === 0;
+    input.dispatchEvent(new Event('input'));
+    return;
+  }
 
-    if (isInputEmpty && isSettingsHidden && isDropdownHidden && areChipsEmpty) {
-      await getCurrentWindow().hide();
-      return;
-    }
-
-    input.value = "";
-    state.activeFilters = [];
+  // "Rimuovi l'ultimo filtro" works only with the search box empty, so its key never deletes typed text.
+  if (matchesBinding(e, bindings.removeChip) && input.value === "" && state.activeFilters.length > 0) {
+    e.preventDefault();
+    state.activeFilters.pop();
     renderChips();
-    state.results = [];
 
-    settingsPanel.classList.add("hidden");
-    settingsBtn.classList.remove("active");
-    shortcutDropdown.classList.add("hidden");
-
-    render();
-    input.focus();
-
-    if (state.showRecents) {
-      await invoke("resize_window", { height: WINDOW_MAX_HEIGHT });
-      lastWindowHeight = WINDOW_MAX_HEIGHT;
-    } else {
-      await invoke("reset_window");
-      lastWindowHeight = WINDOW_MIN_HEIGHT;
-    }
+    input.dispatchEvent(new Event('input'));
     return;
   }
 
-  if (e.key === "Backspace") {
-    if (isAllSelected) {
-      e.preventDefault();
-      state.activeFilters = [];
-      input.value = "";
-      renderChips();
-      deselectChips();
-
-      input.dispatchEvent(new Event('input'));
-      return;
-    }
-
-    if (input.value === "") {
-      if (state.activeFilters.length > 0) {
-        state.activeFilters.pop();
-        renderChips();
-
-        input.dispatchEvent(new Event('input'));
-        return;
-      }
-    }
-  }
-
-  if (!shortcutDropdown.classList.contains("hidden")) {
-    const options = document.querySelectorAll(".shortcut-option");
-    if (options.length === 0) return;
-
-    if (e.key === "ArrowDown" || e.key === "ArrowRight") {
-      e.preventDefault();
-      dropdownIndex = (dropdownIndex + 1) % options.length;
-      renderDropdownFocus();
-    } else if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
-      e.preventDefault();
-      dropdownIndex = (dropdownIndex - 1 + options.length) % options.length;
-      renderDropdownFocus();
-    } else if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      if (dropdownIndex >= 0 && options[dropdownIndex]) {
-        options[dropdownIndex].click();
-      }
-    }
-    return;
-  }
-
-  if (!settingsPanel.classList.contains("hidden")) {
+  if (isSettingsOpen) {
     const focusables = getSettingsFocusables();
 
-    if (e.key === "Tab") {
+    if (matchesBinding(e, bindings.settings)) {
       e.preventDefault();
       toggleSettings();
+      return;
+    }
+    if (e.key === "Tab") {
+      // The focus stays in the search box, whatever key opens the settings.
+      e.preventDefault();
       return;
     }
 
@@ -1613,25 +1808,9 @@ document.addEventListener('keydown', async (e) => {
     if (arrows[e.key]) {
       e.preventDefault();
       moveSettingsFocus(...arrows[e.key]);
-    } else if (e.key === "Enter" || e.key === " ") {
+    } else if ((e.key === "Enter" || e.key === " ") && !altGraph) {
       e.preventDefault();
-
-      if (settingsIndex >= 0) {
-        const item = focusables[settingsIndex];
-        if (item === shortcutDisplay) {
-          item.click();
-          dropdownIndex = 0;
-          setTimeout(renderDropdownFocus, 50);
-        } else if (item.classList.contains("toggle-switch-container")) {
-          const checkbox = item.querySelector('input[type="checkbox"]');
-          if (checkbox) {
-            checkbox.checked = !checkbox.checked;
-            checkbox.dispatchEvent(new Event('change'));
-          }
-        } else {
-          item.click();
-        }
-      }
+      if (settingsIndex >= 0 && focusables[settingsIndex]) activateSettingsItem(focusables[settingsIndex]);
     }
     return;
   }
@@ -1643,11 +1822,21 @@ document.addEventListener('keydown', async (e) => {
 
   const items = document.querySelectorAll(".result-item");
 
-  if (items.length === 0) {
-    if (e.key === "Tab") {
-      e.preventDefault();
-      toggleSettings();
+  // Tab completes a filter word being typed (/cart -> /cartelle) and never moves the focus out of the search box.
+  if (e.key === "Tab" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    e.preventDefault();
+    if (items.length > 0 && commitTypedFilter(items)) {
+      return;
     }
+  }
+
+  if (matchesBinding(e, bindings.settings)) {
+    e.preventDefault();
+    toggleSettings();
+    return;
+  }
+
+  if (items.length === 0) {
     return;
   }
 
@@ -1659,13 +1848,13 @@ document.addEventListener('keydown', async (e) => {
     e.preventDefault();
     state.selectedIndex = (state.selectedIndex - 1 + items.length) % items.length;
     renderStyles();
-  } else if (e.key === "Enter" && e.ctrlKey) {
+  } else if (matchesBinding(e, bindings.reveal)) {
     e.preventDefault();
     const selectedEl = items[state.selectedIndex];
     if (selectedEl && selectedEl.dataset.path && canRevealInExplorer(selectedEl.dataset.path, selectedEl.dataset.kind)) {
       showInExplorer(selectedEl.dataset.path);
     }
-  } else if (e.key === "Enter") {
+  } else if (e.key === "Enter" && !altGraph) {
     e.preventDefault();
 
     if (commitTypedFilter(items)) {
@@ -1676,13 +1865,14 @@ document.addEventListener('keydown', async (e) => {
     if (selectedEl) {
       selectedEl.click();
     }
-  } else if (e.key === "Tab") {
-    e.preventDefault();
-    if (commitTypedFilter(items)) {
-      return;
-    }
-    toggleSettings();
   }
+});
+
+// While a combination is recorded, releasing a modifier updates the preview ("Ctrl + …").
+document.addEventListener('keyup', (e) => {
+  if (!recording || recording.busy) return;
+  const result = recording.kind === "global" ? acceleratorFromKeyEvent(e) : bindingFromKeyEvent(e);
+  if (result.pending) showRecordingPreview(result.mods);
 });
 
 // Enter or Tab on a filter word being typed. A partial or unknown word ("/cart") takes the
@@ -1713,185 +1903,568 @@ window.addEventListener('focus', () => {
   input.focus();
 });
 
-listen('reset_state', async () => {
-  // Short entrance every time the global shortcut or the tray shows the window; hiding stays
-  // instant. Removing and adding the class again restarts the CSS animation.
-  container.classList.remove("is-opening");
-  void container.offsetWidth;
-  container.classList.add("is-opening");
+// Resolves once the current page has been painted: two animation frames, or a short timeout when the page is not being
+// drawn, so revealing the window never waits for a frame that will not come.
+function afterPaint() {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (!done) {
+        done = true;
+        resolve();
+      }
+    };
+    requestAnimationFrame(() => requestAnimationFrame(finish));
+    setTimeout(finish, 100);
+  });
+}
 
+// Back to the empty bar: when the window hides, so the next show never flashes the last search, and on every show.
+function clearSearchView() {
   input.value = "";
   state.activeFilters = [];
   renderChips();
-
   state.results = [];
   state.selectedIndex = 0;
-  settingsPanel.classList.add("hidden");
-  settingsBtn.classList.remove("active");
-  shortcutDropdown.classList.add("hidden");
+  hideSettingsPanel();
   render();
-  input.focus();
+}
 
-  if (state.showRecents) {
+listen("window_hidden", () => {
+  clearSearchView();
+});
+
+// main.rs shows the window cloaked (not drawn yet) and sends "reset_state": the page clears the search, takes its
+// height, paints, and only then asks to be revealed. The glass and the bar appear together, without an entrance
+// animation that would start from a half-drawn window.
+listen('reset_state', async (event) => {
+  clearSearchView();
+  input.focus();
+  refreshLayoutLabels();
+
+  // The tray item "Impostazioni" shows the window with the settings open: the way back when another program
+  // takes the global shortcut.
+  if (event?.payload?.openSettings) {
+    await toggleSettings();
+  } else if (state.showRecents) {
     await invoke("resize_window", { height: WINDOW_MAX_HEIGHT });
     lastWindowHeight = WINDOW_MAX_HEIGHT;
   } else {
     await invoke("reset_window");
     lastWindowHeight = WINDOW_MIN_HEIGHT;
   }
+
+  await afterPaint();
+  await invoke("reveal_window");
 });
 
-let recordedShortcut = "";
+// ---------------------------------------------------------------------------
+// Tasti di scelta rapida: the global shortcut (recorded, or picked from the Velocmd presets) and the keys of the
+// in-app actions. A recorder is a button: click or Enter starts recording, the next combination is checked
+// (shortcuts.js, then main.rs for the global one) and kept only when valid; Esc cancels and the old keys stay.
+// ---------------------------------------------------------------------------
 
-// "Super+Shift+." is shown as "Win + Maiusc + ."; the stored value keeps the accelerator.
-function formatShortcutForDisplay(str) {
-  return str
-    .split("+")
-    .map(key => SHORTCUT_KEY_LABELS[key] ?? key)
-    .join(" + ");
-}
+const globalRecorders = () => [...document.querySelectorAll('[data-recorder="global"]')];
+const globalMessages = () => [...document.querySelectorAll("[data-shortcut-msg]")];
 
-async function loadCurrentShortcut() {
-  const current = await invoke("get_current_shortcut");
-  shortcutDisplay.textContent = formatShortcutForDisplay(current);
-  shortcutDisplay.dataset.value = current;
-}
-
-function checkDropdownSize() {
-  if (!shortcutDropdown.classList.contains("hidden")) {
-    const dropdownHeight = shortcutDropdown.scrollHeight + shortcutDropdown.offsetTop + 20;
-    if (dropdownHeight > WINDOW_MAX_HEIGHT) {
-      invoke("resize_window", { height: dropdownHeight });
-      return;
-    }
-  }
-  invoke("resize_window", { height: WINDOW_MAX_HEIGHT });
-}
-
-shortcutDisplay.onclick = async (e) => {
-  e.stopPropagation();
-  if (shortcutDropdown.classList.contains("hidden")) {
-    shortcutDropdown.classList.remove("hidden");
-    renderKeyHints();
-    await renderDropdown();
-  } else {
-    shortcutDropdown.classList.add("hidden");
-    renderKeyHints();
-  }
-  checkDropdownSize();
-};
-
-async function renderDropdown() {
-  shortcutDropdown.replaceChildren(el("div", "shortcut-option is-loading", SHORTCUT_TEXT.checking));
-  const currentVal = shortcutDisplay.dataset.value;
-
-  let availableShortcuts = [];
-  try {
-    availableShortcuts = await invoke("check_shortcuts_availability", { shortcuts: PRESET_SHORTCUTS });
-  } catch (e) {
-    console.error(e);
-    availableShortcuts = PRESET_SHORTCUTS.map(() => true);
-  }
-
-  shortcutDropdown.replaceChildren();
-
-  let sortedShortcuts = PRESET_SHORTCUTS.map((sc, i) => ({
-    shortcut: sc,
-    available: availableShortcuts[i]
-  }));
-
-  sortedShortcuts.sort((a, b) => {
-    if (a.available === b.available) return 0;
-    return a.available ? -1 : 1;
-  });
-
-  sortedShortcuts.forEach(({ shortcut, available }) => {
-    const div = el("div", "shortcut-option", formatShortcutForDisplay(shortcut));
-    div.setAttribute("role", "option");
-
-    if (shortcut === currentVal) {
-      div.classList.add("active");
-    }
-
-    if (!available) {
-      // Faint text and a lock drawn by styles.css.
-      div.classList.add("unavailable");
-      div.title = SHORTCUT_TEXT.unavailable;
-      div.setAttribute("aria-disabled", "true");
-    } else {
-      div.onclick = () => applyShortcut(shortcut);
-    }
-
-    shortcutDropdown.appendChild(div);
-  });
-
-  checkDropdownSize();
-}
-
-// Which message the shortcut line shows ("updated" clears itself after 2 s).
+// Which message the global shortcut rows show ("" = the description; "updated" clears itself after 2 s).
 let shortcutMsgState = "";
 
-// Colour by outcome: styles.css paints .is-ok green and .is-error red.
-const SHORTCUT_MESSAGE_TONE = { updated: "is-ok", rejected: "is-error", failed: "is-error" };
+// Colour by outcome: styles.css paints .is-ok green and .is-error red; every refusal is an error.
+const SHORTCUT_MESSAGE_TONE = { updated: "is-ok", recording: "" };
 
-function showShortcutMessage(stateKey) {
+function showShortcutMessage(stateKey, text = null) {
   shortcutMsgState = stateKey;
-  shortcutMsg.textContent = stateKey ? SHORTCUT_TEXT[stateKey] : "";
-  shortcutMsg.classList.remove("is-ok", "is-error");
-  if (SHORTCUT_MESSAGE_TONE[stateKey]) shortcutMsg.classList.add(SHORTCUT_MESSAGE_TONE[stateKey]);
+  const message = text
+    ?? (stateKey === "" ? SHORTCUT_TEXT.hint
+      : stateKey === "recording" ? SHORTCUT_TEXT.recordingHint
+        : SHORTCUT_TEXT[stateKey] ?? SHORTCUT_PROBLEM_TEXT[stateKey] ?? SHORTCUT_TEXT.rejected);
+  const tone = stateKey === "" ? "" : SHORTCUT_MESSAGE_TONE[stateKey] ?? "is-error";
+  for (const node of globalMessages()) {
+    node.textContent = message;
+    node.title = message;
+    node.classList.remove("is-ok", "is-error");
+    if (tone) node.classList.add(tone);
+  }
+  if (stateKey === "updated") {
+    setTimeout(() => {
+      if (shortcutMsgState === "updated") showShortcutMessage("");
+    }, 2000);
+  }
+  fitSettingsWindow();
 }
 
-async function applyShortcut(newShortcut) {
-  shortcutDropdown.classList.add("hidden");
+// Message under an in-app action: its description, the recording prompt, the outcome or why the keys were refused.
+function showBindingMessage(actionId, stateKey, otherAction = null) {
+  const node = actionList.querySelector(`[data-binding-msg="${actionId}"]`);
+  if (!node) return;
+  let text;
+  if (!stateKey) text = IN_APP_ACTIONS.find(({ id }) => id === actionId)?.hint ?? "";
+  else if (stateKey === "recording") text = SHORTCUT_TEXT.recordingHint;
+  else if (stateKey === "saved") text = SHORTCUT_TEXT.bindingSaved;
+  else if (stateKey === "restored") text = SHORTCUT_TEXT.bindingRestored;
+  else if (stateKey === "save_failed") text = SHORTCUT_TEXT.bindingFailed;
+  else if (stateKey === "conflict") text = BINDING_PROBLEM_TEXT.conflict(keyActionLabel(otherAction));
+  else text = BINDING_PROBLEM_TEXT[stateKey] ?? SHORTCUT_TEXT.rejected;
+  const isOk = stateKey === "saved" || stateKey === "restored";
+  node.textContent = text;
+  node.title = text;
+  node.classList.toggle("is-ok", isOk);
+  node.classList.toggle("is-error", Boolean(stateKey) && !isOk && stateKey !== "recording");
+  if (isOk) {
+    setTimeout(() => {
+      if (node.textContent === text && recording?.action !== actionId) showBindingMessage(actionId, "");
+    }, 2000);
+  }
+  fitSettingsWindow();
+}
+
+// Layout characters of the punctuation keys, read again whenever the settings open (the layout may have changed).
+function refreshLayoutLabels() {
+  return invoke("keyboard_layout_labels")
+    .then((labels) => {
+      if (labels && typeof labels === "object") {
+        layoutLabels = { tokens: labels.tokens ?? {}, codes: labels.codes ?? {} };
+        renderShortcutViews();
+      }
+    })
+    .catch((err) => console.error("Keyboard layout unavailable:", err));
+}
+
+// A long combination ("Win + Ctrl + Maiusc + Spazio") is cut with an ellipsis in the recorder: its tooltip names it in
+// full, before the hint.
+function recorderTitle(text) {
+  return text ? `${text} · ${SHORTCUT_TEXT.recorderTitle}` : SHORTCUT_TEXT.recorderTitle;
+}
+
+function renderGlobalShortcut() {
+  for (const recorder of globalRecorders()) {
+    if (recording?.element === recorder) continue;
+    const text = currentShortcut ? formatAccelerator(currentShortcut, layoutLabels.tokens) : "…";
+    recorder.textContent = text;
+    recorder.title = recorderTitle(currentShortcut ? text : "");
+    recorder.dataset.value = currentShortcut;
+    recorder.setAttribute("aria-label", `Tasti di scelta rapida: ${text}`);
+  }
+}
+
+function renderActionRecorders() {
+  for (const recorder of actionList.querySelectorAll(".key-recorder")) {
+    const { action } = recorder.dataset;
+    const restore = actionList.querySelector(`[data-restore="${action}"]`);
+    if (restore) {
+      const defaultText = formatBinding(DEFAULT_BINDINGS[action], layoutLabels.codes);
+      restore.hidden = bindings[action] === DEFAULT_BINDINGS[action];
+      restore.title = SHORTCUT_TEXT.restoreTitle(defaultText);
+      restore.setAttribute("aria-label", `${SHORTCUT_TEXT.restoreTitle(defaultText)}: ${keyActionLabel(action)}`);
+    }
+    if (recording?.element === recorder) continue;
+    const text = formatBinding(bindings[action], layoutLabels.codes);
+    recorder.textContent = text;
+    recorder.title = recorderTitle(text);
+    recorder.dataset.value = bindings[action];
+    recorder.setAttribute("aria-label", `${keyActionLabel(action)}: ${text}`);
+  }
+}
+
+// Everything that shows a key: both global recorders, the quick picks, the action recorders, the settings button
+// title and the action bar.
+function renderShortcutViews() {
+  renderGlobalShortcut();
+  renderActionRecorders();
+  renderPresetsState();
+  settingsBtn.title = SETTINGS_BUTTON_TITLE(bindingText("settings"));
   renderKeyHints();
-  updateWindowSize();
-  shortcutDisplay.textContent = SHORTCUT_TEXT.applying;
+}
+
+function buildActionRows() {
+  actionList.replaceChildren(...IN_APP_ACTIONS.map(({ id, label, hint }) => {
+    const row = el("div", "setting-row key-row");
+    const text = el("span", "setting-text");
+    const message = el("span", "setting-hint binding-msg", hint ?? "");
+    message.dataset.bindingMsg = id;
+    message.setAttribute("aria-live", "polite");
+    text.append(el("span", "setting-label", label), message);
+
+    const recorder = el("button", "key-recorder");
+    recorder.type = "button";
+    recorder.dataset.recorder = "action";
+    recorder.dataset.action = id;
+    recorder.title = SHORTCUT_TEXT.recorderTitle;
+    // Clicks keep the focus in the search box, like every control of the settings.
+    recorder.onmousedown = (e) => e.preventDefault();
+    recorder.onclick = (e) => {
+      e.stopPropagation();
+      startRecording("action", recorder, id);
+    };
+
+    // Back to this action's default key only (Esc cancels a recording, so it cannot be recorded again): shown while
+    // the key differs from the default.
+    const restore = el("button", "icon-btn key-restore");
+    restore.type = "button";
+    restore.dataset.restore = id;
+    restore.hidden = true;
+    restore.append(iconElement("rotate-ccw"));
+    restore.onmousedown = (e) => e.preventDefault();
+    restore.onclick = (e) => {
+      e.stopPropagation();
+      restoreDefaultBinding(id);
+    };
+
+    const controls = el("span", "shortcut-controls");
+    controls.append(restore, recorder);
+    row.append(text, controls);
+    return row;
+  }));
+}
+
+async function restoreDefaultBinding(actionId) {
+  cancelRecording();
+  const binding = DEFAULT_BINDINGS[actionId];
+  const problem = bindingProblem(actionId, binding, bindings, currentShortcut, layoutLabels);
+  if (problem) {
+    showBindingMessage(actionId, problem.reason, problem.action);
+    return;
+  }
+  const saved = await saveBindings({ ...bindings, [actionId]: binding });
+  // The button disappears with the custom key: the keyboard cursor moves to the action's recorder.
+  if (settingsIndex >= 0) {
+    const recorder = actionList.querySelector(`.key-recorder[data-action="${actionId}"]`);
+    const index = getSettingsFocusables().indexOf(recorder);
+    if (index >= 0) {
+      settingsIndex = index;
+      renderSettingsFocus();
+    }
+  }
+  showBindingMessage(actionId, saved ? "restored" : "save_failed");
+}
+
+// ---- Quick picks: the eight Velocmd presets, with their state on this computer ----
+
+// Per preset: "reserved" (Windows keeps it), "unavailable" (another app has it), "free", or "checking".
+let presetStatus = {};
+let presetCheckId = 0;
+
+function buildPresetList() {
+  presetList.replaceChildren(...PRESET_SHORTCUTS.map((preset) => {
+    const option = el("button", "preset-option");
+    option.type = "button";
+    option.dataset.value = preset;
+    option.onmousedown = (e) => e.preventDefault();
+    option.onclick = (e) => {
+      e.stopPropagation();
+      pickPreset(preset);
+    };
+    return option;
+  }));
+}
+
+function renderPresetsState() {
+  const current = normalizeAccelerator(currentShortcut);
+  for (const option of presetList.querySelectorAll(".preset-option")) {
+    const value = option.dataset.value;
+    const status = presetStatus[value] ?? "free";
+    const isActive = normalizeAccelerator(value) === current;
+    const isLocked = !isActive && (status === "reserved" || status === "unavailable");
+    option.textContent = formatAccelerator(value, layoutLabels.tokens);
+    option.classList.toggle("active", isActive);
+    option.classList.toggle("unavailable", isLocked);
+    option.classList.toggle("is-loading", !isActive && status === "checking");
+    option.setAttribute("aria-pressed", String(isActive));
+    option.setAttribute("aria-disabled", String(isLocked));
+    const titles = [];
+    if (isActive) titles.push(SHORTCUT_TEXT.activePreset);
+    else if (status === "reserved") titles.push(SHORTCUT_TEXT.reservedPreset);
+    else if (status === "unavailable") titles.push(SHORTCUT_TEXT.unavailable);
+    else if (status === "checking") titles.push(SHORTCUT_TEXT.checking);
+    if (value === DEFAULT_SHORTCUT) titles.push(SHORTCUT_TEXT.defaultPreset);
+    option.title = titles.join(" · ");
+  }
+}
+
+// Marks the presets Windows reserves at once, then asks main.rs which of the others another app already has.
+async function renderPresets() {
+  const checkId = ++presetCheckId;
+  presetStatus = Object.fromEntries(PRESET_SHORTCUTS.map((preset) =>
+    [preset, globalShortcutProblem(preset) ? "reserved" : "checking"]));
+  renderPresetsState();
+
+  let available;
+  try {
+    available = await invoke("check_shortcuts_availability", { shortcuts: PRESET_SHORTCUTS });
+  } catch (err) {
+    console.error(err);
+    available = PRESET_SHORTCUTS.map(() => true);
+  }
+  if (checkId !== presetCheckId) return;
+  PRESET_SHORTCUTS.forEach((preset, index) => {
+    if (presetStatus[preset] !== "reserved") presetStatus[preset] = available[index] ? "free" : "unavailable";
+  });
+  renderPresetsState();
+}
+
+function pickPreset(preset) {
+  cancelRecording();
+  const isActive = normalizeAccelerator(preset) === normalizeAccelerator(currentShortcut);
+  const status = presetStatus[preset];
+  if (!isActive && status === "reserved") {
+    showShortcutMessage(globalShortcutProblem(preset) ?? "reserved");
+  } else if (!isActive && status === "unavailable") {
+    showShortcutMessage("in_use");
+  } else {
+    applyShortcut(preset);
+  }
+}
+
+// ---- Global shortcut ----
+
+// Registers a global shortcut through main.rs (update_shortcut). Refused combinations never reach it; one Windows
+// refuses (another app has it) leaves the previous shortcut registered. Returns the outcome: "updated", a reason of
+// globalShortcutProblem, "in_app", "in_use" or "failed".
+async function applyShortcut(accelerator) {
+  const shortcut = normalizeAccelerator(accelerator) ?? accelerator;
+  const problem = globalShortcutProblem(shortcut);
+  if (problem) {
+    showShortcutMessage(problem);
+    return problem;
+  }
+  const usedBy = actionUsingAccelerator(shortcut, bindings, layoutLabels);
+  if (usedBy) {
+    showShortcutMessage("in_app", SHORTCUT_PROBLEM_TEXT.in_app(usedBy.label));
+    return "in_app";
+  }
+
+  for (const recorder of globalRecorders()) recorder.textContent = SHORTCUT_TEXT.applying;
   showShortcutMessage("");
 
+  let outcome;
   try {
-    const success = await invoke("update_shortcut", { newShortcut });
+    outcome = await invoke("update_shortcut", { newShortcut: shortcut });
+  } catch (err) {
+    console.error(err);
+    outcome = "failed";
+  }
 
-    if (success) {
-      shortcutDisplay.textContent = formatShortcutForDisplay(newShortcut);
-      shortcutDisplay.dataset.value = newShortcut;
-      showShortcutMessage("updated");
+  if (outcome === "updated") {
+    currentShortcut = shortcut;
+  } else {
+    try {
+      currentShortcut = await invoke("get_current_shortcut");
+    } catch (err) {
+      console.error(err);
+    }
+  }
+  renderShortcutViews();
+  showShortcutMessage(outcome === "updated" || outcome === "failed" || SHORTCUT_PROBLEM_TEXT[outcome] ? outcome : "rejected");
+  return outcome;
+}
 
-      setTimeout(() => {
-        if (shortcutMsgState === "updated") showShortcutMessage("");
-      }, 2000);
+// ---- In-app keys ----
 
+// Keeps the keys of the actions in this session at once and saves the ones that differ from the defaults in
+// settings.json (main.rs, save_key_bindings). False when saving failed.
+async function saveBindings(next) {
+  bindings = { ...next };
+  renderShortcutViews();
+  if (!resultsContainer.classList.contains("hidden")) render();
+  try {
+    return (await invoke("save_key_bindings", { bindings: bindingOverrides(bindings) })) !== false;
+  } catch (err) {
+    console.error("Key bindings not saved:", err);
+    return false;
+  }
+}
+
+// ---- Recording ----
+
+function startRecording(kind, element, action = null) {
+  if (recording?.element === element) return;
+  cancelRecording();
+  recording = { kind, element, action, busy: false };
+  element.classList.add("recording");
+  element.setAttribute("aria-pressed", "true");
+  element.textContent = SHORTCUT_TEXT.recording;
+  if (kind === "global") showShortcutMessage("recording");
+  else showBindingMessage(action, "recording");
+  // The global shortcut is suspended while recording: pressing it (or a combination near it) is recorded instead of
+  // hiding the window. main.rs registers it again when the recording ends or the window hides.
+  invoke("set_shortcut_recording", { active: true }).catch((err) => console.error(err));
+  const index = getSettingsFocusables().indexOf(element);
+  if (index >= 0) {
+    settingsIndex = index;
+    renderSettingsFocus();
+  }
+  renderKeyHints();
+}
+
+// Ends the recording and shows the keys in use again; the message of the last outcome stays.
+function stopRecording() {
+  if (!recording) return;
+  const { element } = recording;
+  recording = null;
+  element.classList.remove("recording");
+  element.removeAttribute("aria-pressed");
+  invoke("set_shortcut_recording", { active: false }).catch((err) => console.error(err));
+  renderShortcutViews();
+}
+
+// Esc, a click elsewhere, closing the settings or hiding the window: nothing changes.
+function cancelRecording() {
+  if (!recording) return;
+  const { kind, action } = recording;
+  stopRecording();
+  if (kind === "global") showShortcutMessage("");
+  else showBindingMessage(action, "");
+}
+
+function showRecordingPreview(mods) {
+  if (recording) recording.element.textContent = formatPendingModifiers(mods) || SHORTCUT_TEXT.recording;
+}
+
+async function handleRecorderKey(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  if (!recording || e.repeat) return;
+  if (recording.busy) {
+    // Esc while main.rs is still answering: the recording ends as soon as the answer arrives.
+    if (e.key === "Escape") recording.cancelWhenDone = true;
+    return;
+  }
+  if (e.key === "Escape") {
+    cancelRecording();
+    return;
+  }
+
+  const { kind, action, element } = recording;
+  if (kind === "global") {
+    const result = acceleratorFromKeyEvent(e);
+    if (result.pending) {
+      showRecordingPreview(result.mods);
+      return;
+    }
+    element.textContent = SHORTCUT_TEXT.recording;
+    if (result.error) {
+      showShortcutMessage(result.error);
+      return;
+    }
+    recording.busy = true;
+    const outcome = await applyShortcut(result.accelerator);
+    if (recording?.element !== element) return;
+    recording.busy = false;
+    if (outcome === "updated") {
+      stopRecording();
+    } else if (recording.cancelWhenDone) {
+      // The refusal stays on screen; the old shortcut is registered again.
+      stopRecording();
     } else {
-      const current = await invoke("get_current_shortcut");
-      shortcutDisplay.textContent = formatShortcutForDisplay(current);
-      shortcutDisplay.dataset.value = current;
-      showShortcutMessage("rejected");
+      // Still recording: the old shortcut stays until a valid one is registered. main.rs may have registered the old
+      // one again after a refusal, so it is suspended again.
+      element.textContent = SHORTCUT_TEXT.recording;
+      invoke("set_shortcut_recording", { active: true }).catch((err) => console.error(err));
+    }
+    return;
+  }
+
+  const result = bindingFromKeyEvent(e);
+  if (result.pending) {
+    showRecordingPreview(result.mods);
+    return;
+  }
+  element.textContent = SHORTCUT_TEXT.recording;
+  if (result.error) {
+    showBindingMessage(action, result.error);
+    return;
+  }
+  const problem = bindingProblem(action, result.binding, bindings, currentShortcut, layoutLabels);
+  if (problem) {
+    showBindingMessage(action, problem.reason, problem.action);
+    return;
+  }
+  recording.busy = true;
+  const saved = await saveBindings({ ...bindings, [action]: result.binding });
+  if (recording?.element === element) stopRecording();
+  showBindingMessage(action, saved ? "saved" : "save_failed");
+}
+
+for (const recorder of globalRecorders()) {
+  recorder.title = SHORTCUT_TEXT.recorderTitle;
+  recorder.onmousedown = (e) => e.preventDefault();
+  recorder.onclick = (e) => {
+    e.stopPropagation();
+    startRecording("global", recorder);
+  };
+}
+
+for (const button of [keysOpenBtn, keysBackBtn, keysResetBtn]) {
+  button.onmousedown = (e) => e.preventDefault();
+}
+keysOpenBtn.onclick = (e) => {
+  e.stopPropagation();
+  showKeysView(true);
+};
+keysBackBtn.onclick = (e) => {
+  e.stopPropagation();
+  showKeysView(false);
+};
+keysResetBtn.onclick = async (e) => {
+  e.stopPropagation();
+  cancelRecording();
+  await saveBindings({ ...DEFAULT_BINDINGS });
+  IN_APP_ACTIONS.forEach(({ id }) => showBindingMessage(id, ""));
+  keysResetBtn.textContent = SHORTCUT_TEXT.bindingsReset;
+  keysResetBtn.classList.add("btn-success");
+  setTimeout(() => {
+    keysResetBtn.textContent = KEYS_RESET_LABEL;
+    keysResetBtn.classList.remove("btn-success");
+  }, 1500);
+};
+const KEYS_RESET_LABEL = keysResetBtn.textContent;
+
+async function loadShortcuts() {
+  try {
+    currentShortcut = await invoke("get_current_shortcut");
+  } catch (err) {
+    console.error("Global shortcut unavailable:", err);
+  }
+  try {
+    bindings = resolveBindings(await invoke("get_key_bindings"));
+  } catch (err) {
+    console.error("Key bindings unavailable:", err);
+  }
+  renderShortcutViews();
+  if (!resultsContainer.classList.contains("hidden")) render();
+  try {
+    const status = await invoke("shortcut_status");
+    if (status?.preferred && status.shortcut && shortcutMsgState === "") {
+      showShortcutMessage("standIn", SHORTCUT_TEXT.standIn(
+        formatAccelerator(status.preferred, layoutLabels.tokens),
+        formatAccelerator(status.shortcut, layoutLabels.tokens)));
     }
   } catch (err) {
     console.error(err);
-    showShortcutMessage("failed");
-    loadCurrentShortcut();
   }
 }
+
+buildActionRows();
+buildPresetList();
+renderShortcutViews();
+showShortcutMessage("");
+loadShortcuts();
+refreshLayoutLabels();
 
 input.addEventListener("click", () => {
   deselectChips();
 });
 
 document.addEventListener("click", (e) => {
-  if (!shortcutDisplay.contains(e.target) && !shortcutDropdown.contains(e.target)) {
-    if (!shortcutDropdown.classList.contains("hidden")) {
-      shortcutDropdown.classList.add("hidden");
-      renderKeyHints();
-    }
-    updateWindowSize();
+  if (recording && !recording.element.contains(e.target)) {
+    cancelRecording();
   }
 
   if (!e.target.closest("#search-wrapper")) {
     deselectChips();
   }
 });
-
-loadCurrentShortcut();
 
 async function initAutostart() {
   try {
@@ -1934,17 +2507,6 @@ if (!state.showRecents) {
 } else {
   invoke("resize_window", { height: WINDOW_MAX_HEIGHT });
   lastWindowHeight = WINDOW_MAX_HEIGHT;
-}
-
-function updateWindowSize() {
-  let height = container.offsetHeight;
-
-  height = Math.ceil(height);
-
-  if (height !== lastWindowHeight) {
-    lastWindowHeight = height;
-    invoke("resize_window", { height });
-  }
 }
 
 document.addEventListener('contextmenu', (e) => {
@@ -1991,7 +2553,7 @@ async function checkInitialIndexing() {
     setPlaceholder("indexing");
 
     if (state.showRecents) {
-      resultsList.replaceChildren(infoRow("loader-circle", RESULT_TEXT.indexingTitle, RESULT_TEXT.indexingHint, true));
+      resultsList.replaceChildren(INDEX_STATUS_ROWS.indexing());
       resultsContainer.classList.remove("hidden");
       await invoke("resize_window", { height: WINDOW_MAX_HEIGHT });
       lastWindowHeight = WINDOW_MAX_HEIGHT;
@@ -2014,3 +2576,6 @@ checkInitialIndexing().then((isIndexing) => {
     checkUpdates(true);
   }
 });
+
+// The first show happens while this page is still loading: main.rs keeps the window cloaked until the first frame.
+afterPaint().then(() => invoke("reveal_window"));

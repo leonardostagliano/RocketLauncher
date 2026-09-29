@@ -54,7 +54,6 @@
   --tile: rgb(0 0 0 / 0.05);
   --badge: rgb(0 0 0 / 0.05);
   --sel-fill: rgb(0 0 0 / 0.055);
-  --popover: rgb(252 252 253 / 0.98);
 
   /* Ruoli */
   --accent: #d2501a;
@@ -80,7 +79,6 @@
   --scroll-thumb-hover: rgb(0 0 0 / 0.32);
   --scroll-thumb-active: rgb(0 0 0 / 0.42);
 
-  --shadow-popover: 0 12px 32px rgb(10 12 20 / 0.18), 0 0 0 1px rgb(0 0 0 / 0.08);
   --shadow-thumb: 0 1px 2px rgb(0 0 0 / 0.35);
 
   /* Carattere */
@@ -137,7 +135,6 @@
     --tile: rgb(255 255 255 / 0.08);
     --badge: rgb(255 255 255 / 0.07);
     --sel-fill: rgb(255 255 255 / 0.075);
-    --popover: rgb(34 34 39 / 0.98);
 
     --accent: #ff7a3d;
     --accent-fill: #ff7a3d;
@@ -159,8 +156,6 @@
     --scroll-thumb-near: rgb(255 255 255 / 0.2);
     --scroll-thumb-hover: rgb(255 255 255 / 0.32);
     --scroll-thumb-active: rgb(255 255 255 / 0.42);
-
-    --shadow-popover: 0 12px 32px rgb(0 0 0 / 0.5), 0 0 0 1px rgb(255 255 255 / 0.1);
   }
 }
 
@@ -226,10 +221,11 @@ input {
   color: inherit;
 }
 
+/* I link si distinguono dal testo intorno anche per la sottolineatura, non solo per un colore appena piu' chiaro. */
 a {
   color: var(--ink-2);
   text-decoration: underline;
-  text-decoration-color: var(--hair);
+  text-decoration-color: var(--ink-3);
   text-underline-offset: 2px;
   cursor: pointer;
 }
@@ -277,10 +273,6 @@ a:hover {
   box-shadow: inset 0 1px 0 var(--edge-top);
 }
 
-#container.is-opening {
-  animation: rl-open var(--dur-enter) var(--ease-out);
-}
-
 /* ---------- Barra di ricerca ---------- */
 
 .header {
@@ -304,14 +296,19 @@ a:hover {
   color: var(--ink-2);
 }
 
-.brand-glyph {
-  width: 20px;
-  height: 20px;
-  flex: none;
+/* Holds the #rl-logo symbol; kept rendered (not display: none) so its gradient and clip path stay resolvable. */
+.svg-sprite {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
 }
 
-.brand-glyph .flame {
-  fill: var(--flame);
+/* The Orbita logo, the same drawing as the app and tray icons: big enough for the ring to read. */
+.brand-glyph {
+  width: 24px;
+  height: 24px;
+  flex: none;
 }
 
 .search-wrapper {
@@ -801,11 +798,6 @@ kbd.primary {
   display: none;
 }
 
-.relative {
-  position: relative;
-  flex: none;
-}
-
 .toggle-switch-container {
   position: relative;
   cursor: pointer;
@@ -853,8 +845,9 @@ input:checked + .slider::before {
   transform: translateX(16px);
 }
 
+/* Subito sotto le schede, come nel mockup approvato: main.js (settingsWindowHeight) adatta l'altezza della
+   finestra al contenuto, quindi sotto la nota non resta vetro vuoto. */
 .legal {
-  margin-top: auto;
   padding: 0 6px 2px;
   color: var(--ink-3);
   font-size: 11px;
@@ -867,17 +860,48 @@ input:checked + .slider::before {
 }
 
 .btn.selected,
-.shortcut-display.selected {
+.icon-btn.selected,
+.shortcut-display.selected,
+.key-recorder.selected,
+.preset-option.selected {
   box-shadow: 0 0 0 2px var(--accent);
 }
 
-/* Scelta rapida */
-.shortcut-display {
+.legal a.selected {
+  border-radius: 3px;
+  box-shadow: 0 0 0 2px var(--accent);
+  color: var(--ink);
+}
+
+/* Le due viste delle impostazioni: le schede e la pagina dei tasti di scelta rapida (una sola alla volta). */
+.settings-view {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ---------- Tasti di scelta rapida ---------- */
+
+.shortcut-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+/* Registratore di combinazioni: mostra i tasti in uso; clic o Invio lo mette in ascolto della prossima combinazione. */
+.shortcut-display,
+.key-recorder {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  flex: none;
+  min-width: 64px;
+  max-width: 172px;
   height: 28px;
-  padding: 0 8px 0 11px;
+  padding: 0 10px;
+  overflow: hidden;
+  border: 0;
   border-radius: var(--ctl-r);
   background: var(--ctl);
   box-shadow: inset 0 0 0 1px var(--hair);
@@ -885,64 +909,177 @@ input:checked + .slider::before {
   font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
+  text-overflow: ellipsis;
   cursor: pointer;
-  transition: background-color var(--dur-fast) linear;
+  transition: background-color var(--dur-fast) linear, box-shadow var(--dur-fast) linear;
 }
 
-.shortcut-display:hover {
+.shortcut-display:hover,
+.key-recorder:hover {
   background: var(--ctl-hover);
 }
 
-.shortcut-display::after {
+/* In ascolto: velo e bordo d'accento, come i chip selezionati; il testo invita a premere i tasti. */
+.shortcut-display.recording,
+.key-recorder.recording {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+  color: var(--ink);
+}
+
+.shortcut-display.recording.selected,
+.key-recorder.recording.selected {
+  box-shadow: inset 0 0 0 1px var(--accent-line), 0 0 0 2px var(--accent);
+}
+
+/* Pulsante quadrato con una freccia: apre la pagina di tutti i tasti. */
+.icon-btn {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ctl-r);
+  background: var(--ctl);
+  box-shadow: inset 0 0 0 1px var(--hair);
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) linear, color var(--dur-fast) linear;
+}
+
+.icon-btn:hover {
+  background: var(--ctl-hover);
+  color: var(--ink);
+}
+
+/* Ripristino del tasto predefinito di una singola azione: compare solo quando il tasto è stato cambiato. */
+.key-restore {
+  width: 24px;
+  height: 24px;
+}
+
+.key-restore[hidden] {
+  display: none;
+}
+
+.key-restore .icon {
+  width: 13px;
+  height: 13px;
+}
+
+/* Frecce disegnate con la stessa icona chevron-down, ruotata: avanti (verso destra) e indietro (verso sinistra). */
+.icon-next::before,
+.btn-back::before {
   content: "";
+  flex: none;
   width: 14px;
   height: 14px;
-  background: var(--ink-3);
+  background: currentColor;
   -webkit-mask: var(--icon-chevron-down) center / contain no-repeat;
   mask: var(--icon-chevron-down) center / contain no-repeat;
 }
 
-.shortcut-dropdown {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 20;
-  width: 210px;
-  max-height: 184px;
-  padding: 4px;
-  overflow-y: auto;
-  border-radius: var(--row-r);
-  background: var(--popover);
-  box-shadow: var(--shadow-popover);
-  animation: rl-pop-in var(--dur-fast) var(--ease-out);
+.icon-next::before {
+  transform: rotate(-90deg);
 }
 
-.shortcut-option {
+.btn-back::before {
+  transform: rotate(90deg);
+}
+
+.btn-back {
+  padding: 0 11px 0 7px;
+  gap: 4px;
+}
+
+.view-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 28px;
+  padding: 0 2px;
+}
+
+.view-title {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.card-title-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  height: 30px;
-  padding: 0 10px;
-  border-radius: 6px;
-  color: var(--ink-2);
-  font-size: 12.5px;
-  cursor: pointer;
+  margin-top: 6px;
 }
 
-.shortcut-option:hover,
-.shortcut-option.selected {
+.card-title-row .settings-card-title {
+  margin: 0;
+}
+
+.card-title-row + .action-list > .setting-row:first-child {
+  border-top-color: transparent;
+}
+
+.btn.btn-small {
+  height: 24px;
+  padding: 0 9px;
+  font-size: 11.5px;
+}
+
+.key-row {
+  min-height: 42px;
+}
+
+.keys-caption {
+  margin: 4px 0 4px;
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+/* Le otto combinazioni di Velocmd come scelte rapide: spunta su quella in uso, lucchetto su quelle non disponibili. */
+.preset-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+
+.preset-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 9px 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--ctl);
+  color: var(--ink-2);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) linear, color var(--dur-fast) linear;
+}
+
+.preset-option:hover {
   background: var(--ctl-hover);
   color: var(--ink);
 }
 
-.shortcut-option.active {
+/* Quella in uso: velo e bordo d'accento, come i chip selezionati. */
+.preset-option.active {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
   color: var(--ink);
   font-weight: 600;
 }
 
-.shortcut-option.active::after,
-.shortcut-option.unavailable::after {
+.preset-option.active::after,
+.preset-option.unavailable::after {
   content: "";
   flex: none;
   width: 14px;
@@ -952,30 +1089,58 @@ input:checked + .slider::before {
   mask: var(--icon-check) center / contain no-repeat;
 }
 
-.shortcut-option.active::after {
-  background: var(--accent);
-}
-
-.shortcut-option.unavailable,
-.shortcut-option.is-loading {
+/* Non disponibili (o in verifica): solo il contorno, senza riempimento, cosi' il testo attenuato resta leggibile. */
+.preset-option.unavailable,
+.preset-option.is-loading {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--hair);
   color: var(--ink-3);
   cursor: not-allowed;
 }
 
-.shortcut-option.is-loading {
+.preset-option.is-loading {
   cursor: progress;
 }
 
-.shortcut-option.unavailable::after {
+.preset-option.unavailable::after {
   -webkit-mask-image: var(--icon-lock);
   mask-image: var(--icon-lock);
 }
 
-.shortcut-msg.is-ok {
+/* Il cursore da tastiera resta visibile anche sulla combinazione in uso e su quelle non disponibili, che hanno gia'
+   un bordo proprio: le due ombre si sommano. */
+.preset-option.active.selected {
+  box-shadow: inset 0 0 0 1px var(--accent-line), 0 0 0 2px var(--accent);
+}
+
+.preset-option.unavailable.selected,
+.preset-option.is-loading.selected {
+  box-shadow: inset 0 0 0 1px var(--hair), 0 0 0 2px var(--accent);
+}
+
+.keys-note {
+  margin: 8px 0 6px;
+  color: var(--ink-3);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+/* Messaggi dei registratori: possono andare a capo su due righe invece di essere tagliati. */
+.shortcut-msg:not(:empty),
+.binding-msg:not(:empty) {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+}
+
+.shortcut-msg.is-ok,
+.binding-msg.is-ok {
   color: var(--ok);
 }
 
-.shortcut-msg.is-error {
+.shortcut-msg.is-error,
+.binding-msg.is-error {
   color: var(--danger);
 }
 
@@ -1091,8 +1256,8 @@ input:checked + .slider::before {
 }
 
 .brand .brand-glyph {
-  width: 15px;
-  height: 15px;
+  width: 18px;
+  height: 18px;
 }
 
 .key-hints {
@@ -1160,23 +1325,9 @@ input:checked + .slider::before {
 
 /* ---------- Movimento ---------- */
 
-@keyframes rl-open {
-  from {
-    opacity: 0.6;
-    transform: translateY(-3px);
-  }
-}
-
 @keyframes rl-fade-in {
   from {
     opacity: 0;
-  }
-}
-
-@keyframes rl-pop-in {
-  from {
-    opacity: 0;
-    transform: translateY(-4px) scale(0.98);
   }
 }
 

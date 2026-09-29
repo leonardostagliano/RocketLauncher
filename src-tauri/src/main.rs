@@ -2,18 +2,19 @@
 
 use jwalk::WalkDir;
 use once_cell::sync::Lazy;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Cursor;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::sync::RwLock;
 use std::time::Instant;
 use systemicons::get_icon;
-use tauri::menu::{Menu, MenuItem};
-use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+use tauri::menu::{IsMenuItem, Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -70,10 +71,31 @@ struct IndexedItem {
 }
 
 static CURRENT_SHORTCUT: Lazy<Mutex<String>> =
-    Lazy::new(|| Mutex::new("Super+Shift+.".to_string()));
+    Lazy::new(|| Mutex::new(DEFAULT_SHORTCUT.to_string()));
+/// True while the settings record a combination: the global shortcut is unregistered so that pressing it reaches the
+/// recorder instead of hiding the window. It is registered again when the recording ends or the window hides.
+static SHORTCUT_PAUSED: AtomicBool = AtomicBool::new(false);
+/// settings.json is read, changed and written back by more than one command.
+static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 static FILE_INDEX: Lazy<RwLock<FileIndexData>> = Lazy::new(|| RwLock::new(FileIndexData::default()));
 static SHOW_RECENTS: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(true));
+/// The saved global shortcut when another app held it at start-up: a preset stands in for this session only and the
+/// saved one is tried again at the next start. Cleared as soon as the user picks a shortcut.
+static PREFERRED_SHORTCUT_BUSY: Mutex<Option<String>> = Mutex::new(None);
+/// Armed when the window becomes visible: Windows can take the focus away right after a show (the Win key of the
+/// shortcut being released, the foreground lock), so the first focus loss within SHOW_FOCUS_GRACE takes the focus
+/// back once instead of hiding at once, and the window hides only if it is still not focused shortly after.
 static REFOCUS_ON_BLUR: AtomicBool = AtomicBool::new(false);
+static SHOWN_AT: Mutex<Option<Instant>> = Mutex::new(None);
+const SHOW_FOCUS_GRACE: std::time::Duration = std::time::Duration::from_millis(600);
+/// The window was shown cloaked and waits for the page to paint the clean bar (reveal_window).
+static REVEAL_PENDING: AtomicBool = AtomicBool::new(false);
+/// Which show a delayed reveal belongs to, so a late one never reveals a later show early.
+static REVEAL_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Set by the page's first reveal_window call; until then (start-up) the reveal waits longer for the page to load.
+static PAGE_READY: AtomicBool = AtomicBool::new(false);
+const REVEAL_FALLBACK: std::time::Duration = std::time::Duration::from_millis(150);
+const REVEAL_FALLBACK_LOADING: std::time::Duration = std::time::Duration::from_millis(1500);
 static IS_INDEXING: AtomicBool = AtomicBool::new(false);
 
 // Window size, shared with src/main.js (WINDOW_MIN_HEIGHT, WINDOW_MAX_HEIGHT) and src/styles.css (--bar-h):
@@ -172,6 +194,16 @@ fn window_material() -> serde_json::Value {
     serde_json::json!({ "material": material.as_str(), "corners": corners })
 }
 
+// ---------------------------------------------------------------------------
+// Global shortcut
+//
+// The combination that shows RocketLauncher from any app, in the syntax of tauri-plugin-global-shortcut
+// ("Super+Shift+."). src/shortcuts.js records it, checks it with the same rules as shortcut_problem() and shows it in
+// Italian; here it is checked again, registered (RegisterHotKey) and saved in settings.json.
+// ---------------------------------------------------------------------------
+
+/// The upstream Velocmd presets, offered as quick picks (src/shortcuts.js has the same list); the first is the
+/// default, and at start-up the first one that registers replaces a saved shortcut that no longer does.
 const PRESET_SHORTCUTS: &[&str] = &[
     "Super+Shift+.",
     "Alt+Space",
@@ -182,6 +214,176 @@ const PRESET_SHORTCUTS: &[&str] = &[
     "Alt+S",
     "Super+/"
 ];
+const DEFAULT_SHORTCUT: &str = "Super+Shift+.";
+
+/// Why a global shortcut is refused before RocketLauncher tries to register it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShortcutProblem {
+    /// Not a combination tauri-plugin-global-shortcut understands (or a key it cannot register).
+    Invalid,
+    /// No Ctrl, Alt or Win, and not F1-F24.
+    MissingModifier,
+    /// Maiusc alone would take capital letters and symbols away from every app.
+    ShiftOnly,
+    /// Windows keeps it (lock, desktop, snap, task view, emoji panel…) or every window uses it (Alt+Tab, Alt+F4…).
+    Reserved,
+    /// Ctrl + Alt + a character key is AltGr on Windows, which types @ # [ ] € on an Italian keyboard.
+    AltGr,
+    /// Alt + a digit of the numeric keypad types a character by its code in every app (Alt+64 is @).
+    AltCode,
+    /// Ctrl (with or without Maiusc) + a key every app uses: select, copy, paste, cut, undo, redo, save, find, print,
+    /// new, open, close and new tab, switch tab, delete a word, start and end of the text.
+    Common,
+}
+
+impl ShortcutProblem {
+    /// The reason code src/shortcuts.js turns into an Italian message.
+    fn as_str(self) -> &'static str {
+        match self {
+            ShortcutProblem::Invalid => "invalid",
+            ShortcutProblem::MissingModifier => "missing_modifier",
+            ShortcutProblem::ShiftOnly => "shift_only",
+            ShortcutProblem::Reserved => "reserved",
+            ShortcutProblem::AltGr => "altgr",
+            ShortcutProblem::AltCode => "alt_code",
+            ShortcutProblem::Common => "common",
+        }
+    }
+}
+
+fn is_letter_key(key: Code) -> bool {
+    use Code::*;
+    matches!(
+        key,
+        KeyA | KeyB | KeyC | KeyD | KeyE | KeyF | KeyG | KeyH | KeyI | KeyJ | KeyK | KeyL | KeyM | KeyN | KeyO | KeyP
+            | KeyQ | KeyR | KeyS | KeyT | KeyU | KeyV | KeyW | KeyX | KeyY | KeyZ
+    )
+}
+
+fn is_digit_key(key: Code) -> bool {
+    use Code::*;
+    matches!(key, Digit0 | Digit1 | Digit2 | Digit3 | Digit4 | Digit5 | Digit6 | Digit7 | Digit8 | Digit9)
+}
+
+fn is_function_key(key: Code) -> bool {
+    use Code::*;
+    matches!(
+        key,
+        F1 | F2 | F3 | F4 | F5 | F6 | F7 | F8 | F9 | F10 | F11 | F12 | F13 | F14 | F15 | F16 | F17 | F18 | F19 | F20
+            | F21 | F22 | F23 | F24
+    )
+}
+
+fn is_arrow_key(key: Code) -> bool {
+    matches!(key, Code::ArrowUp | Code::ArrowDown | Code::ArrowLeft | Code::ArrowRight)
+}
+
+fn is_numpad_digit(key: Code) -> bool {
+    use Code::*;
+    matches!(key, Numpad0 | Numpad1 | Numpad2 | Numpad3 | Numpad4 | Numpad5 | Numpad6 | Numpad7 | Numpad8 | Numpad9)
+}
+
+/// A key that writes a character: letters, digits and the punctuation keys (VK_OEM_*).
+fn is_character_key(key: Code) -> bool {
+    use Code::*;
+    is_letter_key(key)
+        || is_digit_key(key)
+        || matches!(
+            key,
+            Backquote | Minus | Equal | BracketLeft | BracketRight | Backslash | Semicolon | Quote | Comma | Period | Slash
+        )
+}
+
+/// Combinations Windows keeps for itself or that every window uses. RegisterHotKey refuses most of them anyway; the
+/// list gives a clear reason and stops the few it would accept. isReservedByWindows in src/shortcuts.js is the same.
+fn is_reserved_by_windows(mods: Modifiers, key: Code) -> bool {
+    use Code::*;
+    let win = mods.contains(Modifiers::SUPER);
+    let ctrl = mods.contains(Modifiers::CONTROL);
+    let alt = mods.contains(Modifiers::ALT);
+    let shift = mods.contains(Modifiers::SHIFT);
+    if win {
+        if key == KeyL {
+            return true;
+        }
+        return match (ctrl, alt, shift) {
+            (false, false, false) => {
+                is_letter_key(key)
+                    || is_digit_key(key)
+                    || is_arrow_key(key)
+                    || matches!(
+                        key,
+                        Tab | Space | Home | PrintScreen | Comma | Period | Semicolon | Equal | Minus | Escape | Pause
+                            | NumpadAdd | NumpadSubtract
+                    )
+            }
+            (false, false, true) => is_digit_key(key) || is_arrow_key(key) || matches!(key, KeyS | KeyM | KeyR | Space),
+            (true, false, false) => {
+                is_digit_key(key)
+                    || matches!(key, KeyD | F4 | ArrowLeft | ArrowRight | Enter | Space | KeyC | KeyF | KeyN | KeyO | KeyQ)
+            }
+            (false, true, false) => {
+                is_digit_key(key)
+                    || matches!(key, KeyR | KeyG | KeyB | KeyD | KeyK | PrintScreen | Space | ArrowUp | ArrowDown)
+            }
+            (true, false, true) => is_digit_key(key) || key == KeyB,
+            _ => false,
+        };
+    }
+    match (ctrl, alt, shift) {
+        (false, true, false) => matches!(key, Tab | Escape | F4 | PrintScreen),
+        (false, true, true) => matches!(key, Tab | Escape),
+        (true, false, false) | (true, false, true) => key == Escape,
+        (true, true, false) => matches!(key, Tab | Delete),
+        (false, false, true) => key == F10,
+        _ => false,
+    }
+}
+
+/// Why a global shortcut cannot be used, or None when RocketLauncher may try to register it. globalShortcutProblem
+/// in src/shortcuts.js applies the same rules, in the same order, to show the message before asking.
+fn shortcut_problem(accelerator: &str) -> Option<ShortcutProblem> {
+    let Ok(shortcut) = Shortcut::from_str(accelerator) else {
+        return Some(ShortcutProblem::Invalid);
+    };
+    let (mods, key) = (shortcut.mods, shortcut.key);
+    let win = mods.contains(Modifiers::SUPER);
+    let ctrl = mods.contains(Modifiers::CONTROL);
+    let alt = mods.contains(Modifiers::ALT);
+    let shift = mods.contains(Modifiers::SHIFT);
+    if !win && !ctrl && !alt && !is_function_key(key) {
+        return Some(if shift { ShortcutProblem::ShiftOnly } else { ShortcutProblem::MissingModifier });
+    }
+    if is_reserved_by_windows(mods, key) {
+        return Some(ShortcutProblem::Reserved);
+    }
+    if ctrl && alt && !win && is_character_key(key) {
+        return Some(ShortcutProblem::AltGr);
+    }
+    if alt && !ctrl && !shift && !win && is_numpad_digit(key) {
+        return Some(ShortcutProblem::AltCode);
+    }
+    if ctrl && !alt && !win && is_common_ctrl_key(key) {
+        return Some(ShortcutProblem::Common);
+    }
+    None
+}
+
+/// Keys that, with Ctrl (and Maiusc or not), every app uses: taking them globally would steal them everywhere.
+/// COMMON_CTRL_KEYS in src/shortcuts.js is the same list.
+fn is_common_ctrl_key(key: Code) -> bool {
+    use Code::*;
+    matches!(
+        key,
+        KeyA | KeyC | KeyV | KeyX | KeyZ | KeyY | Insert | KeyS | KeyF | KeyP | KeyW | KeyT | KeyN | KeyO | Tab
+            | Backspace | Delete | Home | End
+    )
+}
+
+// ---------------------------------------------------------------------------
+// settings.json (%APPDATA%\it.stagliano.rocketlauncher): the global shortcut ("shortcut") and the keys of the in-app
+// actions that differ from the defaults ("keyBindings"). Other values in the file are kept as they are.
+// ---------------------------------------------------------------------------
 
 fn get_config_path(app: &AppHandle) -> std::path::PathBuf {
     let mut path = app.path().app_config_dir().unwrap_or_default();
@@ -197,35 +399,76 @@ fn get_binfile_path(app: &AppHandle) -> std::path::PathBuf {
     path
 }
 
-fn load_shortcut(app: &AppHandle) -> String {
+/// The settings object held by the text of settings.json; missing, unreadable or not an object: empty.
+fn settings_from_text(content: Option<&str>) -> serde_json::Map<String, serde_json::Value> {
+    content
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .and_then(|value| match value {
+            serde_json::Value::Object(map) => Some(map),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn read_settings(app: &AppHandle) -> serde_json::Map<String, serde_json::Value> {
+    settings_from_text(std::fs::read_to_string(get_config_path(app)).ok().as_deref())
+}
+
+/// Sets one value in settings.json and keeps the others. False when the file could not be written.
+fn write_setting(app: &AppHandle, key: &str, value: serde_json::Value) -> bool {
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = get_config_path(app);
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(shortcut) = v.get("shortcut").and_then(|s| s.as_str()) {
-                return shortcut.to_string();
-            }
-        }
-    }
-    "Super+Shift+.".to_string()
+    let mut settings = settings_from_text(std::fs::read_to_string(&path).ok().as_deref());
+    settings.insert(key.to_string(), value);
+    let text = serde_json::to_string_pretty(&serde_json::Value::Object(settings)).unwrap_or_default();
+    std::fs::write(&path, text).is_ok()
+}
+
+fn load_shortcut(app: &AppHandle) -> String {
+    read_settings(app)
+        .get("shortcut")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| DEFAULT_SHORTCUT.to_string())
 }
 
 fn save_shortcut(app: &AppHandle, shortcut: &str) {
-    let path = get_config_path(app);
-    let mut data = serde_json::json!({});
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-            data = v;
-        }
-    }
-    if let Some(obj) = data.as_object_mut() {
-        obj.insert("shortcut".to_string(), serde_json::json!(shortcut));
-    } else {
-        data = serde_json::json!({ "shortcut": shortcut });
-    }
-    let _ = std::fs::write(&path, serde_json::to_string_pretty(&data).unwrap_or_default());
+    write_setting(app, "shortcut", serde_json::json!(shortcut));
 }
 
+/// Keys of the in-app actions as src/main.js saves them: only the ones changed from the defaults, action id to
+/// binding ("settings": "F2"). src/shortcuts.js checks every value when it reads them back (resolveBindings); here
+/// only the shape is enforced, so a broken caller cannot fill the file.
+const MAX_KEY_BINDINGS: usize = 32;
+
+fn valid_key_bindings(bindings: &BTreeMap<String, String>) -> bool {
+    bindings.len() <= MAX_KEY_BINDINGS
+        && bindings.iter().all(|(action, keys)| {
+            (1..=32).contains(&action.len())
+                && action.chars().all(|c| c.is_ascii_alphanumeric())
+                && (1..=64).contains(&keys.len())
+                && keys.chars().all(|c| c.is_ascii_graphic())
+        })
+}
+
+/// Icons already extracted, by path: every keystroke lists up to 50 apps again, and extracting and re-encoding
+/// their icons each time cost more than the search itself. Emptied when the index is rebuilt.
+static ICON_CACHE: Lazy<Mutex<std::collections::HashMap<String, Option<String>>>> =
+    Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
+
 fn get_file_icon_base64(path: &str) -> Option<String> {
+    if let Some(cached) = ICON_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(path) {
+        return cached.clone();
+    }
+    let icon = extract_file_icon_base64(path);
+    ICON_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path.to_string(), icon.clone());
+    icon
+}
+
+fn extract_file_icon_base64(path: &str) -> Option<String> {
     match get_icon(path, 32) {
         Ok(icon_vec) => {
             if let Ok(img) = image::load_from_memory(&icon_vec) {
@@ -271,8 +514,44 @@ fn get_file_icon_base64(path: &str) -> Option<String> {
 }
 
 fn show_main_window(app: &AppHandle) {
+    show_main_window_with(app, false);
+}
+
+#[cfg(windows)]
+#[link(name = "dwmapi")]
+extern "system" {
+    fn DwmSetWindowAttribute(hwnd: isize, attribute: u32, value: *const std::ffi::c_void, size: u32) -> i32;
+}
+
+/// DWMWA_CLOAK: the window stays shown for Windows and WebView2, which keeps painting, but DWM does not draw it.
+fn set_cloaked(window: &tauri::WebviewWindow, cloaked: bool) {
+    #[cfg(windows)]
+    if let Ok(hwnd) = window.hwnd() {
+        const DWMWA_CLOAK: u32 = 13;
+        let value: i32 = cloaked.into();
+        unsafe {
+            DwmSetWindowAttribute(
+                hwnd.0 as isize,
+                DWMWA_CLOAK,
+                &value as *const i32 as *const std::ffi::c_void,
+                std::mem::size_of::<i32>() as u32,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (window, cloaked);
+}
+
+/// Shows the window centred near the top, cloaked: DWM would draw the Mica glass at once while the page still has to
+/// paint, so the glass flashed empty (or with the last search) before the bar appeared. src/main.js clears the search
+/// on "reset_state" (and opens the settings for the tray item "Impostazioni"), waits for that frame and calls
+/// reveal_window; if the page does not answer in time the window is revealed anyway.
+fn show_main_window_with(app: &AppHandle, open_settings: bool) {
     if let Some(window) = app.get_webview_window("main") {
         let show_recents = *SHOW_RECENTS.lock().unwrap();
+        let generation = REVEAL_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+        REVEAL_PENDING.store(true, Ordering::SeqCst);
+        set_cloaked(&window, true);
 
         let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
             width: WINDOW_WIDTH,
@@ -286,15 +565,63 @@ fn show_main_window(app: &AppHandle) {
         }));
         let _ = window.unminimize();
         let _ = window.show();
+        // Taken now, while this process may still bring a window to the foreground (the shortcut or the tray click).
         let _ = window.set_focus();
-        let _ = window.emit("reset_state", ());
+        let _ = window.emit("reset_state", serde_json::json!({ "openSettings": open_settings }));
+
+        let wait = if PAGE_READY.load(Ordering::SeqCst) { REVEAL_FALLBACK } else { REVEAL_FALLBACK_LOADING };
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(wait);
+            if REVEAL_GENERATION.load(Ordering::SeqCst) == generation {
+                reveal_main_window(&app);
+            }
+        });
+    }
+}
+
+/// Uncloaks the window shown by show_main_window_with, once, and gives it the focus.
+fn reveal_main_window(app: &AppHandle) {
+    if !REVEAL_PENDING.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        set_cloaked(&window, false);
+        let _ = window.set_focus();
+        *SHOWN_AT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
+        REFOCUS_ON_BLUR.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Called by src/main.js once it has painted the clean bar after "reset_state" (and once at start-up).
+#[tauri::command]
+fn reveal_window(app: AppHandle) {
+    PAGE_READY.store(true, Ordering::SeqCst);
+    reveal_main_window(&app);
+}
+
+/// Hides the window; src/main.js clears the search on "window_hidden", so the page is already clean for the next show.
+fn hide_main_window(window: &tauri::WebviewWindow) {
+    REVEAL_PENDING.store(false, Ordering::SeqCst);
+    REFOCUS_ON_BLUR.store(false, Ordering::SeqCst);
+    let _ = tauri::WebviewWindow::hide(window);
+    // A hidden window is not drawn anyway; never leave it cloaked for a show that does not go through here.
+    set_cloaked(window, false);
+    let _ = window.emit("window_hidden", ());
+}
+
+/// Hides the window from the page (Esc on an empty search, and the other actions that close the bar).
+#[tauri::command]
+fn hide_window(app: AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        hide_main_window(&window);
     }
 }
 
 fn toggle_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         if window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(false) {
-            let _ = window.hide();
+            hide_main_window(&window);
         } else {
             show_main_window(app);
         }
@@ -311,35 +638,51 @@ fn set_recents_state(show: bool) {
     *SHOW_RECENTS.lock().unwrap() = show;
 }
 
+/// Registers a new global shortcut and saves it. The answer is "updated", a ShortcutProblem code (nothing was tried)
+/// or "in_use" (Windows refused it: another app has it); on any refusal the previous shortcut stays registered.
 #[tauri::command]
-fn update_shortcut(app: AppHandle, new_shortcut: String) -> bool {
-    let mut current = CURRENT_SHORTCUT.lock().unwrap();
+fn update_shortcut(app: AppHandle, new_shortcut: String) -> &'static str {
+    if let Some(problem) = shortcut_problem(&new_shortcut) {
+        return problem.as_str();
+    }
+    let mut current = CURRENT_SHORTCUT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let _ = app.global_shortcut().unregister(current.as_str());
 
-    match app.global_shortcut().register(new_shortcut.as_str()) {
+    let outcome = match app.global_shortcut().register(new_shortcut.as_str()) {
         Ok(_) => {
             println!("Shortcut updated to: {}", new_shortcut);
             *current = new_shortcut.clone();
             save_shortcut(&app, &new_shortcut);
-            true
+            *PREFERRED_SHORTCUT_BUSY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            "updated"
         }
         Err(e) => {
             eprintln!("Failed to register {}: {:?}", new_shortcut, e);
             let _ = app.global_shortcut().register(current.as_str());
-            false
+            "in_use"
         }
-    }
+    };
+    // Either way the shortcut in use is registered again, also after a recording suspended it.
+    SHORTCUT_PAUSED.store(false, Ordering::SeqCst);
+    outcome
 }
 
+/// For each combination, whether RocketLauncher could use it: not refused by shortcut_problem() and free, found by
+/// registering it for a moment. The shortcut in use counts as available.
 #[tauri::command]
 fn check_shortcuts_availability(app: AppHandle, shortcuts: Vec<String>) -> Vec<bool> {
-    let current = CURRENT_SHORTCUT.lock().unwrap().clone();
-    let _ = app.global_shortcut().unregister(current.as_str());
+    let current = CURRENT_SHORTCUT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    let paused = SHORTCUT_PAUSED.load(Ordering::SeqCst);
+    if !paused {
+        let _ = app.global_shortcut().unregister(current.as_str());
+    }
 
     let mut results = Vec::new();
     for sc in shortcuts {
         if sc == current {
             results.push(true);
+        } else if shortcut_problem(&sc).is_some() {
+            results.push(false);
         } else {
             match app.global_shortcut().register(sc.as_str()) {
                 Ok(_) => {
@@ -353,8 +696,170 @@ fn check_shortcuts_availability(app: AppHandle, shortcuts: Vec<String>) -> Vec<b
         }
     }
 
-    let _ = app.global_shortcut().register(current.as_str());
+    if !paused {
+        let _ = app.global_shortcut().register(current.as_str());
+    }
     results
+}
+
+/// Suspends the global shortcut while the settings record a combination (active = true) and registers it again
+/// afterwards, so that pressing it is recorded instead of hiding the window.
+#[tauri::command]
+fn set_shortcut_recording(app: AppHandle, active: bool) {
+    let current = CURRENT_SHORTCUT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if active {
+        if !SHORTCUT_PAUSED.swap(true, Ordering::SeqCst) {
+            let _ = app.global_shortcut().unregister(current.as_str());
+        }
+    } else if SHORTCUT_PAUSED.swap(false, Ordering::SeqCst) {
+        let _ = app.global_shortcut().register(current.as_str());
+    }
+}
+
+/// Registers the global shortcut again if a recording suspended it: called when the window hides, so the shortcut
+/// can never stay off.
+fn resume_global_shortcut(app: &AppHandle) {
+    if SHORTCUT_PAUSED.swap(false, Ordering::SeqCst) {
+        let current = CURRENT_SHORTCUT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        let _ = app.global_shortcut().register(current.as_str());
+    }
+}
+
+/// The global shortcut in use, whether this app has it registered right now, whether a recording suspended it and,
+/// when a preset stands in for it this session, the saved shortcut another app was holding at start-up ("preferred").
+#[tauri::command]
+fn shortcut_status(app: AppHandle) -> serde_json::Value {
+    let current = CURRENT_SHORTCUT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    let preferred = PREFERRED_SHORTCUT_BUSY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    serde_json::json!({
+        "shortcut": current,
+        "registered": app.global_shortcut().is_registered(current.as_str()),
+        "paused": SHORTCUT_PAUSED.load(Ordering::SeqCst),
+        "preferred": preferred
+    })
+}
+
+/// The changed keys of the in-app actions from settings.json (an empty object when none).
+#[tauri::command]
+fn get_key_bindings(app: AppHandle) -> serde_json::Value {
+    read_settings(&app)
+        .get("keyBindings")
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+/// Saves the changed keys of the in-app actions (an empty map restores the defaults). False when refused or not written.
+#[tauri::command]
+fn save_key_bindings(app: AppHandle, bindings: BTreeMap<String, String>) -> bool {
+    valid_key_bindings(&bindings) && write_setting(&app, "keyBindings", serde_json::json!(bindings))
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard layout: the character each punctuation key shows on the user's layout, so the interface writes "Win + ù"
+// on an Italian keyboard where a US one has "/".
+// ---------------------------------------------------------------------------
+
+/// Accelerator names of the punctuation keys and the virtual key tauri-plugin-global-shortcut registers for each.
+const LAYOUT_TOKEN_KEYS: &[(&str, u32)] = &[
+    ("`", 0xC0),
+    ("-", 0xBD),
+    ("=", 0xBB),
+    ("[", 0xDB),
+    ("]", 0xDD),
+    ("\\", 0xDC),
+    (";", 0xBA),
+    ("'", 0xDE),
+    (",", 0xBC),
+    (".", 0xBE),
+    ("/", 0xBF),
+];
+
+/// KeyboardEvent.code of the keys that write a character and their scan code (set 1): the in-app keys are matched
+/// by physical key, whose character depends on the layout.
+const LAYOUT_CODE_SCANCODES: &[(&str, u32)] = &[
+    ("Backquote", 0x29), ("Digit1", 0x02), ("Digit2", 0x03), ("Digit3", 0x04), ("Digit4", 0x05), ("Digit5", 0x06),
+    ("Digit6", 0x07), ("Digit7", 0x08), ("Digit8", 0x09), ("Digit9", 0x0A), ("Digit0", 0x0B), ("Minus", 0x0C),
+    ("Equal", 0x0D), ("KeyQ", 0x10), ("KeyW", 0x11), ("KeyE", 0x12), ("KeyR", 0x13), ("KeyT", 0x14), ("KeyY", 0x15),
+    ("KeyU", 0x16), ("KeyI", 0x17), ("KeyO", 0x18), ("KeyP", 0x19), ("BracketLeft", 0x1A), ("BracketRight", 0x1B),
+    ("KeyA", 0x1E), ("KeyS", 0x1F), ("KeyD", 0x20), ("KeyF", 0x21), ("KeyG", 0x22), ("KeyH", 0x23), ("KeyJ", 0x24),
+    ("KeyK", 0x25), ("KeyL", 0x26), ("Semicolon", 0x27), ("Quote", 0x28), ("Backslash", 0x2B), ("KeyZ", 0x2C),
+    ("KeyX", 0x2D), ("KeyC", 0x2E), ("KeyV", 0x2F), ("KeyB", 0x30), ("KeyN", 0x31), ("KeyM", 0x32), ("Comma", 0x33),
+    ("Period", 0x34), ("Slash", 0x35), ("IntlBackslash", 0x56),
+];
+
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    fn GetKeyboardLayout(thread_id: u32) -> isize;
+    fn MapVirtualKeyExW(code: u32, map_type: u32, layout: isize) -> u32;
+}
+
+#[cfg(windows)]
+const MAPVK_VSC_TO_VK_EX: u32 = 3;
+#[cfg(windows)]
+const MAPVK_VK_TO_CHAR: u32 = 2;
+
+/// The unshifted character of a virtual key on a layout. Letters and digits are named by the key itself.
+#[cfg(windows)]
+fn layout_key_label(vk: u32, layout: isize) -> Option<String> {
+    match vk {
+        0 => None,
+        0x30..=0x39 | 0x41..=0x5A => char::from_u32(vk).map(String::from),
+        _ => {
+            // The high bit marks a dead key; the low word is its character either way.
+            let value = unsafe { MapVirtualKeyExW(vk, MAPVK_VK_TO_CHAR, layout) } & 0xFFFF;
+            char::from_u32(value).filter(|c| !c.is_control()).map(String::from)
+        }
+    }
+}
+
+/// "tokens": accelerator name -> character, for the global shortcut; "codes": KeyboardEvent.code -> character, for
+/// the in-app keys. Both for the keyboard layout of the window's thread (the command runs on the main thread).
+#[tauri::command]
+fn keyboard_layout_labels() -> serde_json::Value {
+    let mut tokens = serde_json::Map::new();
+    let mut codes = serde_json::Map::new();
+    #[cfg(windows)]
+    {
+        let layout = unsafe { GetKeyboardLayout(0) };
+        for (token, vk) in LAYOUT_TOKEN_KEYS {
+            if let Some(label) = layout_key_label(*vk, layout) {
+                tokens.insert(token.to_string(), label.into());
+            }
+        }
+        for (code, scancode) in LAYOUT_CODE_SCANCODES {
+            let vk = unsafe { MapVirtualKeyExW(*scancode, MAPVK_VSC_TO_VK_EX, layout) };
+            if let Some(label) = layout_key_label(vk, layout) {
+                codes.insert(code.to_string(), label.into());
+            }
+        }
+    }
+    serde_json::json!({ "tokens": tokens, "codes": codes })
+}
+
+// ---------------------------------------------------------------------------
+// Tray and start-up
+// ---------------------------------------------------------------------------
+
+/// Items of the tray menu (area di notifica), in order: id and label. "Impostazioni" shows the window with the
+/// settings open, the way back when another program swallows the global shortcut.
+const TRAY_MENU: [(&str, &str); 3] = [
+    ("show", "Mostra RocketLauncher"),
+    ("settings", "Impostazioni"),
+    ("quit", "Esci"),
+];
+
+/// Argument of the sign-in start that tauri-plugin-autostart writes in the HKCU Run value. Started with it,
+/// RocketLauncher stays in the notification area (indexing in the background) until the shortcut or the tray.
+const AUTOSTART_ARG: &str = "--autostart";
+
+fn started_by_autostart<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    args.into_iter().any(|arg| arg.as_ref() == AUTOSTART_ARG)
 }
 // ---------------------------------------------------------------------------
 // Search vocabulary
@@ -414,7 +919,7 @@ const ROCKET_COMMANDS: &[RocketCommand] = &[
     rocket_command("rocket:quit", "Esci da RocketLauncher", &["Quit RocketLauncher", "quit", "exit", "esci", "chiudi rocketlauncher"], 192, false),
     rocket_command("rocket:close_window", "Chiudi scheda o finestra attiva", &["Close Active Tab/Window", "close tab", "close window", "chiudi scheda", "chiudi finestra"], 191, false),
     rocket_command("rocket:request_shutdown", "Arresta il sistema", &["Shutdown", "shut down", "power off", "spegni", "spegni il pc", "spegnimento"], 190, true),
-    rocket_command("rocket:media_play", "Multimediale: Riproduci/Pausa", &["Media: Play/Pause", "media", "play", "pause", "riproduci", "pausa"], 189, true),
+    rocket_command("rocket:media_play", "Multimediale: Riproduci/pausa", &["Media: Play/Pause", "media", "play", "pause", "riproduci", "pausa"], 189, true),
     rocket_command("rocket:media_next", "Multimediale: Brano successivo", &["Media: Next Track", "next track", "brano successivo", "traccia successiva"], 188, true),
     rocket_command("rocket:media_prev", "Multimediale: Brano precedente", &["Media: Previous Track", "previous track", "brano precedente", "traccia precedente"], 187, true),
     rocket_command("rocket:request_restart", "Riavvia il sistema", &["Restart", "reboot", "riavvia", "riavvia il pc", "riavvio"], 180, true),
@@ -473,7 +978,7 @@ const NOX_COMMANDS: &[(CatalogEntry, u16)] = &[
     (entry("nox:quit", "Nox: Esci", &["Nox: Quit", "quit", "esci", "chiudi"]), 200),
     (entry("nox:hyper_toggle", "Nox: Attiva/disattiva modalità Hyper", &["Nox: Toggle Hyper Mode", "hyper"]), 199),
     (entry("nox:brightness_up", "Nox: Aumenta oscuramento (+10%)", &["Nox: Increase Dimness (+10%)", "increase", "aumenta", "più scuro"]), 198),
-    (entry("nox:brightness_down", "Nox: Riduci oscuramento (-10%)", &["Nox: Decrease Dimness (-10%)", "decrease", "riduci", "più chiaro"]), 197),
+    (entry("nox:brightness_down", "Nox: Riduci oscuramento (\u{2212}10%)", &["Nox: Decrease Dimness (-10%)", "decrease", "riduci", "più chiaro"]), 197),
     (entry("nox:check_updates", "Nox: Controlla aggiornamenti", &["Nox: Check for Updates", "updates", "aggiornamenti"]), 195),
     (entry("nox:help", "Nox: Guida (GitHub)", &["Nox: Help (GitHub)", "help", "guida", "aiuto"]), 194),
 ];
@@ -865,11 +1370,21 @@ fn search_index(index_data: &FileIndexData, query: &str) -> Vec<SearchResult> {
 
     let mut filters: Vec<FilterToken> = Vec::new();
     let mut search_terms = Vec::new();
+    // Running a command and searching the web are asked for by the first word of the query (private-mode
+    // chips aside), as the interface reads it. Later on, such a word is a file extension, as upstream
+    // treated every unknown word: `/c /cmd build` lists the build*.cmd scripts on C:.
+    let mut past_first_word = false;
 
     for part in query_trim.split_whitespace() {
         if (part.starts_with('@') || part.starts_with('/')) && part.len() > 1 {
-            filters.push(classify_filter(&part[1..]));
+            let mut filter = classify_filter(&part[1..]);
+            if filter == FilterToken::FrontendOnly && past_first_word {
+                filter = FilterToken::Extension(fold_for_search(&part[1..]));
+            }
+            past_first_word |= filter != FilterToken::Private;
+            filters.push(filter);
         } else {
+            past_first_word = true;
             search_terms.push(part);
         }
     }
@@ -1114,20 +1629,10 @@ fn open_file(app: tauri::AppHandle, path: String) {
     let mut success = false;
 
     if path.starts_with("http://") || path.starts_with("https://") {
-        #[cfg(target_os = "windows")]
-        {
-            let mut command = std::process::Command::new("cmd.exe");
-            command.args(["/C", "start", "", &path])
-                .creation_flags(CREATE_NO_WINDOW);
-            if command.spawn().is_ok() {
-                success = true;
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            if tauri_plugin_opener::open_path(&path, None::<&str>).is_ok() {
-                success = true;
-            }
+        // The default browser through ShellExecute, never through `cmd /C start`: cmd would split an address
+        // at `&` (`watch?v=x&t=10`) and run the rest as a command.
+        if tauri_plugin_opener::open_url(&path, None::<&str>).is_ok() {
+            success = true;
         }
     } else if path.starts_with("ms-settings:") || path.starts_with("shell:") {
         #[cfg(target_os = "windows")]
@@ -1170,7 +1675,7 @@ fn open_file(app: tauri::AppHandle, path: String) {
 
     if success {
         if let Some(window) = app.get_webview_window("main") {
-            let _ = window.hide();
+            hide_main_window(&window);
         }
     }
 }
@@ -1208,7 +1713,7 @@ fn show_in_explorer(app: tauri::AppHandle, path: String) {
     }
 
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
+        hide_main_window(&window);
     }
 }
 
@@ -1259,13 +1764,9 @@ fn open_url_private(app: tauri::AppHandle, url: String) {
             }
         }
 
-        if !success {
-            let mut command = std::process::Command::new("cmd.exe");
-            command.args(["/C", "start", "", &url])
-                .creation_flags(CREATE_NO_WINDOW);
-            if command.spawn().is_ok() {
-                success = true;
-            }
+        // No known browser: the default one, in a normal window (ShellExecute, as open_file does).
+        if !success && tauri_plugin_opener::open_url(&url, None::<&str>).is_ok() {
+            success = true;
         }
     }
 
@@ -1278,7 +1779,7 @@ fn open_url_private(app: tauri::AppHandle, url: String) {
 
     if success {
         if let Some(window) = app.get_webview_window("main") {
-            let _ = window.hide();
+            hide_main_window(&window);
         }
     }
 }
@@ -1356,7 +1857,7 @@ fn show_desktop(app: tauri::AppHandle) {
     }
 
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
+        hide_main_window(&window);
     }
 }
 
@@ -1371,7 +1872,7 @@ fn quit_app(app: tauri::AppHandle) {
 #[tauri::command]
 fn close_active_window(app: tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
+        hide_main_window(&window);
     }
 
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1490,7 +1991,7 @@ fn focus_window(app: tauri::AppHandle, hwnd_val: isize) {
     }
 
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
+        hide_main_window(&window);
     }
 }
 
@@ -1898,6 +2399,8 @@ fn build_index_internal(app: &tauri::AppHandle, silent: bool) {
     };
 
     *FILE_INDEX.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = new_index;
+    // A reinstalled or updated app may have a new icon: extract it again on the next search.
+    ICON_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
     println!(
         "\nIndexing complete (silent: {})! Items: {} (Took: {:?})",
         silent,
@@ -1978,7 +2481,7 @@ fn smoke_exit_code<R: tauri::Runtime>(context: &tauri::Context<R>, expected_vers
         return 10;
     }
     let assets = context.assets();
-    if ["index.html", "main.js", "update-source.js", "icons.js", "styles.css"]
+    if ["index.html", "main.js", "update-source.js", "icons.js", "shortcuts.js", "styles.css"]
         .iter()
         .any(|name| assets.get(&tauri::utils::assets::AssetKey::from(*name)).is_none())
     {
@@ -2005,14 +2508,19 @@ fn main() {
     // start_periodic_indexing();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            show_main_window(app);
+        // Starting RocketLauncher again shows the running one; a second sign-in start leaves it where it is.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if !started_by_autostart(&argv) {
+                show_main_window(app);
+            }
         }))
         // A single registration with an explicit name: the HKCU Run value is called
-        // "RocketLauncher" whatever package_info().name resolves to.
+        // "RocketLauncher" whatever package_info().name resolves to. It starts the exe with --autostart, so the
+        // sign-in start stays in the notification area.
         .plugin(
             tauri_plugin_autostart::Builder::new()
                 .app_name("RocketLauncher")
+                .arg(AUTOSTART_ARG)
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
@@ -2049,7 +2557,14 @@ fn main() {
             open_url_private,
             execute_nox_command,
             show_in_explorer,
-            window_material
+            window_material,
+            set_shortcut_recording,
+            shortcut_status,
+            get_key_bindings,
+            save_key_bindings,
+            keyboard_layout_labels,
+            reveal_window,
+            hide_window
         ])
         .setup(|app| {
             let mut has_binfile = false;
@@ -2074,17 +2589,27 @@ fn main() {
 
             window.on_window_event(move |event| match event {
                 tauri::WindowEvent::Focused(false) => {
-                    if REFOCUS_ON_BLUR.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                    // A recording in the settings never leaves the global shortcut suspended once the bar is gone.
+                    resume_global_shortcut(w_clone.app_handle());
+                    // Still cloaked, waiting for the page: reveal_main_window gives the focus back.
+                    if REVEAL_PENDING.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let just_shown = SHOWN_AT
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .is_some_and(|shown| shown.elapsed() < SHOW_FOCUS_GRACE);
+                    if REFOCUS_ON_BLUR.swap(false, Ordering::SeqCst) && just_shown {
                         let _ = w_clone.set_focus();
                         let w_check = w_clone.clone();
                         std::thread::spawn(move || {
                             std::thread::sleep(std::time::Duration::from_millis(150));
                             if !w_check.is_focused().unwrap_or(false) {
-                                let _ = w_check.hide();
+                                hide_main_window(&w_check);
                             }
                         });
                     } else {
-                        let _ = w_clone.hide();
+                        hide_main_window(&w_clone);
                     }
                 }
                 // Acrylic keeps the tint it was applied with: give it the one of the new theme.
@@ -2094,11 +2619,17 @@ fn main() {
                 _ => {}
             });
 
-            let quit_i = MenuItem::with_id(app, "quit", "Esci", true, None::<&str>)?;
-            let show_i = MenuItem::with_id(app, "show", "Mostra RocketLauncher", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+            let menu_owner = app.handle();
+            let tray_items = TRAY_MENU
+                .iter()
+                .map(|(id, label)| MenuItem::with_id(menu_owner, *id, *label, true, None::<&str>))
+                .collect::<Result<Vec<_>, _>>()?;
+            let tray_item_refs: Vec<&dyn IsMenuItem<_>> =
+                tray_items.iter().map(|item| item as &dyn IsMenuItem<_>).collect();
+            let menu = Menu::with_items(app, &tray_item_refs)?;
 
-            // Tray icon: generated from branding/rocketlauncher-tray.svg by `npm run icons`.
+            // Tray icon: the same master as the app icon, branding/rocketlauncher-icon.svg, rendered at 32 px by
+            // `npm run icons`.
             let icon_bytes = include_bytes!("../icons/tray/32x32.png");
             let tray_icon = match image::load_from_memory(icon_bytes) {
                 Ok(dynamic_img) => {
@@ -2120,13 +2651,19 @@ fn main() {
                     "show" => {
                         toggle_main_window(app);
                     }
+                    "settings" => {
+                        show_main_window_with(app, true);
+                    }
                     _ => {
                         println!("menu item {:?} not handled", event.id);
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
+                    // Tauri reports a click twice, on press and on release: acting on both showed the bar and hid it
+                    // again at once (a Velocmd bug). Only the release counts.
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
                         ..
                     } = event
                     {
@@ -2137,17 +2674,27 @@ fn main() {
                 .build(app)?;
 
             let loaded_shortcut = load_shortcut(app.handle());
-            let mut current = CURRENT_SHORTCUT.lock().unwrap();
+            let mut current = CURRENT_SHORTCUT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
-            if app.global_shortcut().register(loaded_shortcut.as_str()).is_ok() {
+            if shortcut_problem(&loaded_shortcut).is_none()
+                && app.global_shortcut().register(loaded_shortcut.as_str()).is_ok()
+            {
                 *current = loaded_shortcut.clone();
             } else {
                 eprintln!("Failed to register loaded shortcut, trying fallbacks...");
+                // A saved shortcut that is no longer valid is replaced for good; one that another app holds right now
+                // (often only while Windows is signing in) stays saved and is tried again at the next start.
+                let saved_is_valid = shortcut_problem(&loaded_shortcut).is_none();
                 let mut found = false;
                 for sc in PRESET_SHORTCUTS {
-                    if app.global_shortcut().register(*sc).is_ok() {
+                    if shortcut_problem(sc).is_none() && app.global_shortcut().register(*sc).is_ok() {
                         *current = sc.to_string();
-                        save_shortcut(app.handle(), sc);
+                        if saved_is_valid {
+                            *PREFERRED_SHORTCUT_BUSY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                                Some(loaded_shortcut.clone());
+                        } else {
+                            save_shortcut(app.handle(), sc);
+                        }
                         println!("Fallback shortcut registered: {}", sc);
                         found = true;
                         break;
@@ -2157,9 +2704,15 @@ fn main() {
                     eprintln!("Failed to register any fallback shortcuts");
                 }
             }
+            drop(current);
 
-            show_main_window(app.handle());
-            REFOCUS_ON_BLUR.store(true, Ordering::SeqCst);
+            // Started at sign-in by "Avvia con Windows": stay in the notification area and index in the background;
+            // the shortcut or the tray shows the bar. Any other start shows it, as before.
+            if started_by_autostart(std::env::args_os()) {
+                println!("Started at sign-in: RocketLauncher stays in the notification area.");
+            } else {
+                show_main_window(app.handle());
+            }
 
             Ok(())
         })
@@ -2412,6 +2965,21 @@ mod tests {
     }
 
     #[test]
+    fn a_run_or_search_word_after_the_first_word_is_a_file_extension() {
+        let index = index_with(&[
+            ("C:\\Tools\\build.cmd", "build.cmd", ItemKind::File),
+            ("C:\\Tools\\build.ps1", "build.ps1", ItemKind::File),
+            ("D:\\Tools\\build.cmd", "build.cmd", ItemKind::File),
+        ]);
+        assert_eq!(paths(&search_index(&index, "/c /cmd build")), vec!["C:\\Tools\\build.cmd"]);
+        assert_eq!(paths(&search_index(&index, "build /cmd")).len(), 2);
+        // As the first word (private-mode chips aside) it is still the interface's run or search row.
+        assert!(search_index(&index, "/cmd build").is_empty());
+        assert!(search_index(&index, "/esegui /c build").is_empty());
+        assert_eq!(search_index(&index, "/privato /google").len(), WEB_PRESETS.len());
+    }
+
+    #[test]
     fn pinned_rows_need_two_letters_starting_a_word() {
         assert!(pinned_entry_matches(THIS_PC.name, THIS_PC.aliases, "pc"));
         assert!(pinned_entry_matches(THIS_PC.name, THIS_PC.aliases, "questo"));
@@ -2440,5 +3008,143 @@ mod tests {
         assert!(query_starts_with_filter("@nox-dimmer", &["nox"]));
         assert!(!query_starts_with_filter("rocket", &["rocket"]));
         assert!(!query_starts_with_filter("/web", &["tabs"]));
+    }
+
+    fn problem(accelerator: &str) -> Option<&'static str> {
+        shortcut_problem(accelerator).map(ShortcutProblem::as_str)
+    }
+
+    #[test]
+    fn the_default_and_the_usable_velocmd_presets_pass_validation() {
+        assert_eq!(PRESET_SHORTCUTS[0], DEFAULT_SHORTCUT);
+        for preset in ["Super+Shift+.", "Alt+Space", "Ctrl+Space", "Ctrl+Shift+Space", "Alt+S", "Super+/"] {
+            assert!(PRESET_SHORTCUTS.contains(&preset), "{preset} is a preset");
+            assert_eq!(problem(preset), None, "{preset}");
+        }
+        // Windows search and the input language switch: listed as quick picks, locked as reserved.
+        assert_eq!(problem("Super+S"), Some("reserved"));
+        assert_eq!(problem("Super+Space"), Some("reserved"));
+    }
+
+    #[test]
+    fn recorded_combinations_in_the_accelerator_syntax_are_accepted() {
+        for accelerator in ["Ctrl+Shift+K", "Super+Ctrl+Alt+Shift+F12", "Ctrl+Alt+F5", "Alt+Shift+1", "F9", "Shift+F5",
+            "Super+Shift+K", "Ctrl+Alt+Space", "Ctrl+Numpad5", "Super+`", "Ctrl+Shift+'", "Alt+MediaPlayPause"]
+        {
+            assert_eq!(problem(accelerator), None, "{accelerator}");
+        }
+    }
+
+    #[test]
+    fn a_global_shortcut_needs_ctrl_alt_or_win_unless_it_is_a_function_key() {
+        assert_eq!(problem("A"), Some("missing_modifier"));
+        assert_eq!(problem("Space"), Some("missing_modifier"));
+        assert_eq!(problem("Escape"), Some("missing_modifier"));
+        assert_eq!(problem("Shift+A"), Some("shift_only"));
+        assert_eq!(problem("Shift+."), Some("shift_only"));
+        assert_eq!(problem("F1"), None);
+        assert_eq!(problem("F24"), None);
+    }
+
+    #[test]
+    fn windows_reserved_and_dangerous_combinations_are_refused() {
+        for accelerator in [
+            "Super+L", "Super+Shift+L", "Ctrl+Alt+Delete", "Alt+Tab", "Alt+Shift+Tab", "Alt+F4", "Ctrl+Escape",
+            "Ctrl+Shift+Escape", "Alt+Escape", "Super+D", "Super+E", "Super+R", "Super+I", "Super+S", "Super+X",
+            "Super+Tab", "Super+1", "Super+0", "Super+.", "Super+;", "Super+Up", "Super+Shift+S", "Super+Shift+Left",
+            "Super+Ctrl+D", "Super+Ctrl+Left", "Super+Alt+R", "Super+Ctrl+Shift+B", "Ctrl+Alt+Tab", "Shift+F10",
+            "Alt+PrintScreen", "Super+PrintScreen",
+        ] {
+            assert_eq!(problem(accelerator), Some("reserved"), "{accelerator}");
+        }
+    }
+
+    #[test]
+    fn altgr_characters_and_editing_combinations_are_refused() {
+        // AltGr is Ctrl+Alt on Windows: AltGr+ò (VK_OEM_3) types @, AltGr+à # , AltGr+è [, AltGr+E €.
+        for accelerator in ["Ctrl+Alt+`", "Ctrl+Alt+'", "Ctrl+Alt+;", "Ctrl+Alt+E", "Ctrl+Alt+Shift+;", "Ctrl+Alt+1"] {
+            assert_eq!(problem(accelerator), Some("altgr"), "{accelerator}");
+        }
+        assert_eq!(problem("Super+Ctrl+Alt+E"), None, "with Win it is not AltGr any more");
+        for accelerator in [
+            "Ctrl+A", "Ctrl+C", "Ctrl+V", "Ctrl+X", "Ctrl+Z", "Ctrl+Y", "Ctrl+Insert", "Ctrl+S", "Ctrl+F", "Ctrl+P",
+            "Ctrl+W", "Ctrl+T", "Ctrl+N", "Ctrl+O", "Ctrl+Tab", "Ctrl+Backspace", "Ctrl+Delete", "Ctrl+Home", "Ctrl+End",
+            "Ctrl+Shift+C", "Ctrl+Shift+V", "Ctrl+Shift+S", "Ctrl+Shift+P", "Ctrl+Shift+T", "Ctrl+Shift+Tab",
+        ] {
+            assert_eq!(problem(accelerator), Some("common"), "{accelerator}");
+        }
+        for accelerator in ["Ctrl+Shift+K", "Ctrl+Space", "Ctrl+Shift+Space", "Ctrl+Alt+F5", "Super+Ctrl+S"] {
+            assert_eq!(problem(accelerator), None, "{accelerator}");
+        }
+        // Alt + keypad digits type characters by code in every app (Alt+64 is @): the hotkey would swallow the digit.
+        for accelerator in ["Alt+Numpad0", "Alt+Numpad6", "Alt+Num4", "Alt+Numpad9"] {
+            assert_eq!(problem(accelerator), Some("alt_code"), "{accelerator}");
+        }
+        for accelerator in ["Alt+Shift+Numpad6", "Ctrl+Numpad6", "Super+Alt+Numpad6", "Alt+NumpadAdd", "Alt+6"] {
+            assert_eq!(problem(accelerator), None, "{accelerator}");
+        }
+    }
+
+    #[test]
+    fn unparsable_accelerators_are_invalid() {
+        for accelerator in ["", "Ctrl+", "Ctrl+Shift", "Ctrl+K+Alt", "Win+K", "Ctrl+IntlBackslash", "Ctrl+Foo"] {
+            assert_eq!(problem(accelerator), Some("invalid"), "{accelerator:?}");
+        }
+    }
+
+    #[test]
+    fn the_tray_menu_has_settings_between_show_and_quit() {
+        assert_eq!(
+            TRAY_MENU,
+            [("show", "Mostra RocketLauncher"), ("settings", "Impostazioni"), ("quit", "Esci")]
+        );
+    }
+
+    #[test]
+    fn only_the_sign_in_start_is_silent() {
+        assert!(started_by_autostart(["C:\\Programmi\\RocketLauncher.exe", "--autostart"]));
+        assert!(started_by_autostart(vec!["RocketLauncher.exe".to_string(), AUTOSTART_ARG.to_string()]));
+        assert!(!started_by_autostart(["C:\\Programmi\\RocketLauncher.exe"]));
+        assert!(!started_by_autostart(["RocketLauncher.exe", "--autostartx", "autostart"]));
+        assert!(!started_by_autostart(Vec::<String>::new()));
+    }
+
+    #[test]
+    fn settings_json_keeps_the_values_it_does_not_change() {
+        let settings = settings_from_text(Some(r#"{ "shortcut": "Alt+S", "other": 1 }"#));
+        assert_eq!(settings.get("shortcut").and_then(|v| v.as_str()), Some("Alt+S"));
+        assert_eq!(settings.get("other").and_then(|v| v.as_i64()), Some(1));
+        assert!(settings_from_text(Some("[1, 2]")).is_empty());
+        assert!(settings_from_text(Some("not json")).is_empty());
+        assert!(settings_from_text(None).is_empty());
+    }
+
+    #[test]
+    fn saved_key_bindings_must_look_like_action_ids_and_keys() {
+        let ok = BTreeMap::from([("settings".to_string(), "F2".to_string()), ("reveal".to_string(), "Ctrl+Shift+Enter".to_string())]);
+        assert!(valid_key_bindings(&ok));
+        assert!(valid_key_bindings(&BTreeMap::new()));
+        assert!(!valid_key_bindings(&BTreeMap::from([("set tings".to_string(), "F2".to_string())])));
+        assert!(!valid_key_bindings(&BTreeMap::from([("settings".to_string(), String::new())])));
+        assert!(!valid_key_bindings(&BTreeMap::from([("settings".to_string(), "Ctrl + A".to_string())])));
+        let too_many: BTreeMap<String, String> = (0..=MAX_KEY_BINDINGS).map(|i| (format!("a{i}"), "F2".to_string())).collect();
+        assert!(!valid_key_bindings(&too_many));
+    }
+
+    #[test]
+    fn layout_tables_name_each_key_once() {
+        let tokens: HashSet<&str> = LAYOUT_TOKEN_KEYS.iter().map(|(token, _)| *token).collect();
+        let vks: HashSet<u32> = LAYOUT_TOKEN_KEYS.iter().map(|(_, vk)| *vk).collect();
+        assert_eq!(tokens.len(), LAYOUT_TOKEN_KEYS.len());
+        assert_eq!(vks.len(), LAYOUT_TOKEN_KEYS.len());
+        // Every punctuation name is one the global shortcut plugin parses (the key is VK-based: "/" is VK_OEM_2).
+        for (token, _) in LAYOUT_TOKEN_KEYS {
+            assert!(Shortcut::from_str(&format!("Ctrl+{token}")).is_ok(), "{token}");
+        }
+        let codes: HashSet<&str> = LAYOUT_CODE_SCANCODES.iter().map(|(code, _)| *code).collect();
+        let scancodes: HashSet<u32> = LAYOUT_CODE_SCANCODES.iter().map(|(_, sc)| *sc).collect();
+        assert_eq!(codes.len(), LAYOUT_CODE_SCANCODES.len());
+        assert_eq!(scancodes.len(), LAYOUT_CODE_SCANCODES.len());
+        assert_eq!(LAYOUT_CODE_SCANCODES.len(), 26 + 10 + 12);
     }
 }

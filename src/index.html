@@ -11,23 +11,43 @@
 </head>
 
 <body>
+  <!-- Logo "Orbita": the same drawing as branding/rocketlauncher-icon.svg (app and tray icons), defined once and reused. -->
+  <svg class="svg-sprite" aria-hidden="true" focusable="false">
+    <defs>
+      <linearGradient id="rl-tile" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#2B2B33" />
+        <stop offset="1" stop-color="#141418" />
+      </linearGradient>
+      <clipPath id="rl-front">
+        <rect x="0" y="532" width="1024" height="492" />
+      </clipPath>
+    </defs>
+    <symbol id="rl-logo" viewBox="0 0 1024 1024">
+      <rect x="24" y="24" width="976" height="976" rx="224" fill="url(#rl-tile)" />
+      <rect x="25.5" y="25.5" width="973" height="973" rx="222.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.12" stroke-width="3" />
+      <ellipse cx="512" cy="532" rx="410" ry="166" transform="rotate(28 512 532)" fill="none" stroke="#4AA8FF" stroke-width="84" stroke-opacity="0.72" />
+      <g transform="rotate(45 512 512) translate(512 512) scale(0.9) translate(-512 -526)">
+        <path d="M512 150C606 222 646 318 646 430V650C646 680 624 702 594 702H430C400 702 378 680 378 650V430C378 318 418 222 512 150Z" fill="#F5F5F7" />
+        <circle cx="512" cy="420" r="62" fill="#1B1B21" />
+        <path d="M378 520L290 608C278 620 272 636 272 652V742L378 690Z" fill="#8E8E99" />
+        <path d="M646 520L734 608C746 620 752 636 752 652V742L646 690Z" fill="#8E8E99" />
+        <path d="M512 752C556 800 566 846 512 902C458 846 468 800 512 752Z" fill="#FF7A3D" />
+      </g>
+      <ellipse cx="512" cy="532" rx="410" ry="166" transform="rotate(28 512 532)" fill="none" stroke="#4AA8FF" stroke-width="84" clip-path="url(#rl-front)" />
+    </symbol>
+  </svg>
+
   <div id="container" class="minimal-state">
     <header class="header" data-tauri-drag-region>
       <div class="logo-area" data-tauri-drag-region aria-hidden="true">
-        <svg class="brand-glyph app-logo" viewBox="0 0 1024 1024" fill="currentColor" focusable="false">
-          <g transform="rotate(45 512 512) translate(512 512) scale(1.24) translate(-512 -526)">
-            <path fill-rule="evenodd" d="M512 150C606 222 646 318 646 430V650C646 680 624 702 594 702H430C400 702 378 680 378 650V430C378 318 418 222 512 150ZM512 358A62 62 0 1 0 512 482A62 62 0 1 0 512 358Z" />
-            <path d="M378 520L290 608C278 620 272 636 272 652V742L378 690Z" />
-            <path d="M646 520L734 608C746 620 752 636 752 652V742L646 690Z" />
-            <path class="flame" d="M512 752C556 800 566 846 512 902C458 846 468 800 512 752Z" />
-          </g>
-        </svg>
+        <svg class="brand-glyph app-logo" viewBox="0 0 1024 1024" focusable="false"><use href="#rl-logo" /></svg>
       </div>
 
       <div class="search-wrapper" id="search-wrapper">
         <div id="chips-area" class="chips-area"></div>
         <input type="text" id="search-input" placeholder="Cerca app, file, cartelle e comandi" autofocus
-          autocomplete="off" spellcheck="false" aria-label="Cerca" aria-controls="results" />
+          autocomplete="off" spellcheck="false" role="combobox" aria-label="Cerca" aria-controls="results"
+          aria-autocomplete="list" aria-expanded="false" />
       </div>
 
       <div id="memory-usage" class="memory-stats hidden" title="Memoria usata da RocketLauncher">RAM: 0,0 MB</div>
@@ -42,96 +62,132 @@
     </header>
 
     <section id="settings-panel" class="settings-panel hidden" aria-label="Impostazioni">
-      <div class="settings-columns">
-        <div class="settings-card">
-          <h2 class="settings-card-title">Generale</h2>
+      <div id="settings-main" class="settings-view">
+        <div class="settings-columns">
+          <div class="settings-card">
+            <h2 class="settings-card-title">Generale</h2>
 
-          <div class="setting-row">
-            <span class="setting-text">
-              <span class="setting-label">Scelta rapida</span>
-              <span id="shortcut-msg" class="setting-hint shortcut-msg" aria-live="polite"></span>
-            </span>
-            <div class="relative">
-              <div id="shortcut-display" class="shortcut-display" role="button" aria-haspopup="listbox"
-                title="Combinazione di tasti che mostra o nasconde RocketLauncher">Caricamento…</div>
-              <div id="shortcut-dropdown" class="shortcut-dropdown hidden" role="listbox"
-                aria-label="Scelte rapide disponibili"></div>
+            <div class="setting-row">
+              <span class="setting-text">
+                <span class="setting-label">Tasti di scelta rapida</span>
+                <span id="shortcut-msg" class="setting-hint shortcut-msg" data-shortcut-msg aria-live="polite"></span>
+              </span>
+              <div class="shortcut-controls">
+                <button type="button" id="shortcut-display" class="shortcut-display" data-recorder="global">Caricamento…</button>
+                <button type="button" id="keys-open-btn" class="icon-btn icon-next" title="Tutti i tasti di scelta rapida"
+                  aria-label="Tutti i tasti di scelta rapida"></button>
+              </div>
+            </div>
+
+            <label class="toggle-switch-container setting-row"
+              title="Mostra gli elementi aperti di recente quando la ricerca è vuota">
+              <span class="setting-text">
+                <span class="label-text">Mostra i recenti</span>
+                <span class="setting-hint">Quando la ricerca è vuota</span>
+              </span>
+              <input type="checkbox" id="show-recents-toggle" role="switch" tabindex="-1">
+              <span class="slider" aria-hidden="true"></span>
+            </label>
+
+            <label class="toggle-switch-container setting-row" title="Avvia RocketLauncher all'accesso a Windows">
+              <span class="setting-text">
+                <span class="label-text">Avvia con Windows</span>
+                <span class="setting-hint">All'accesso a Windows</span>
+              </span>
+              <input type="checkbox" id="startup-toggle" role="switch" tabindex="-1" checked>
+              <span class="slider" aria-hidden="true"></span>
+            </label>
+
+            <label class="toggle-switch-container setting-row"
+              title="Mostra la memoria (RAM) usata da RocketLauncher nella barra di ricerca">
+              <span class="setting-text">
+                <span class="label-text">Mostra memoria usata</span>
+                <span class="setting-hint">RAM di RocketLauncher, nella barra di ricerca</span>
+              </span>
+              <input type="checkbox" id="analytics-toggle" role="switch" tabindex="-1">
+              <span class="slider" aria-hidden="true"></span>
+            </label>
+          </div>
+
+          <div class="settings-card">
+            <h2 class="settings-card-title">Dati e aggiornamenti</h2>
+
+            <div class="setting-row">
+              <span class="setting-text">
+                <span class="setting-label">Aggiornamenti</span>
+                <span id="app-version" class="setting-hint">Versione</span>
+              </span>
+              <button type="button" id="update-btn" class="btn btn-secondary">Controlla aggiornamenti</button>
+            </div>
+
+            <div class="setting-row">
+              <span class="setting-text">
+                <span class="setting-label">Recenti</span>
+                <span class="setting-hint">Elementi aperti di recente</span>
+              </span>
+              <button type="button" id="clear-recents-btn" class="btn btn-danger">Svuota recenti</button>
+            </div>
+
+            <div class="setting-row">
+              <span class="setting-text">
+                <span class="setting-label">Valori predefiniti</span>
+                <span class="setting-hint">Recenti, avvio, memoria e tasti di scelta rapida</span>
+              </span>
+              <button type="button" id="reset-pos-btn" class="btn btn-secondary"
+                title="Riporta recenti, avvio con Windows, memoria usata e tasti di scelta rapida ai valori predefiniti">Ripristina</button>
+            </div>
+
+            <div class="setting-row">
+              <span class="setting-text">
+                <span class="setting-label">Guida</span>
+                <span class="setting-hint">Comandi, filtri e tasti di scelta rapida</span>
+              </span>
+              <button type="button" id="help-btn" class="btn btn-secondary" title="Guida e documentazione">Apri la guida</button>
             </div>
           </div>
-
-          <label class="toggle-switch-container setting-row"
-            title="Mostra gli elementi aperti di recente quando la ricerca è vuota">
-            <span class="setting-text">
-              <span class="label-text">Mostra i recenti</span>
-              <span class="setting-hint">Quando la ricerca è vuota</span>
-            </span>
-            <input type="checkbox" id="show-recents-toggle" role="switch" tabindex="-1">
-            <span class="slider" aria-hidden="true"></span>
-          </label>
-
-          <label class="toggle-switch-container setting-row" title="Avvia RocketLauncher all'accesso a Windows">
-            <span class="setting-text">
-              <span class="label-text">Avvia con Windows</span>
-              <span class="setting-hint">All'accesso a Windows</span>
-            </span>
-            <input type="checkbox" id="startup-toggle" role="switch" tabindex="-1" checked>
-            <span class="slider" aria-hidden="true"></span>
-          </label>
-
-          <label class="toggle-switch-container setting-row"
-            title="Mostra la RAM usata da RocketLauncher nella barra di ricerca">
-            <span class="setting-text">
-              <span class="label-text">Modalità statistiche</span>
-              <span class="setting-hint">RAM usata, nella barra di ricerca</span>
-            </span>
-            <input type="checkbox" id="analytics-toggle" role="switch" tabindex="-1">
-            <span class="slider" aria-hidden="true"></span>
-          </label>
         </div>
 
-        <div class="settings-card">
-          <h2 class="settings-card-title">Dati e aggiornamenti</h2>
+        <p class="legal">
+          RocketLauncher è una versione modificata di
+          <a href="https://github.com/YashvardhanG/Velocmd" data-external>Velocmd</a> di Yashvardhan Gupta,
+          distribuita con licenza <a id="license-link" href="#" data-external>GPL-3.0</a> senza alcuna garanzia.
+        </p>
+      </div>
 
-          <div class="setting-row">
-            <span class="setting-text">
-              <span class="setting-label">Aggiornamenti</span>
-              <span id="app-version" class="setting-hint">Versione</span>
-            </span>
-            <button type="button" id="update-btn" class="btn btn-secondary">Controlla aggiornamenti</button>
+      <!-- Tasti di scelta rapida: the global shortcut with the Velocmd presets, and the keys of the in-app actions. -->
+      <div id="keys-view" class="settings-view hidden" role="group" aria-label="Tasti di scelta rapida">
+        <div class="view-header">
+          <button type="button" id="keys-back-btn" class="btn btn-back" title="Torna alle impostazioni (Esc)">Impostazioni</button>
+          <h2 class="view-title">Tasti di scelta rapida</h2>
+        </div>
+
+        <div class="settings-columns">
+          <div class="settings-card">
+            <h2 class="settings-card-title">Apri RocketLauncher</h2>
+
+            <div class="setting-row key-row">
+              <span class="setting-text">
+                <span class="setting-label">Combinazione</span>
+                <span class="setting-hint shortcut-msg" data-shortcut-msg aria-live="polite"></span>
+              </span>
+              <button type="button" id="keys-global-recorder" class="shortcut-display" data-recorder="global">Caricamento…</button>
+            </div>
+
+            <p class="keys-caption">Combinazioni consigliate</p>
+            <div id="preset-list" class="preset-grid" role="group" aria-label="Combinazioni consigliate"></div>
+            <p class="keys-note">Frecce e Invio sono fissi. Durante la registrazione Esc annulla.</p>
           </div>
 
-          <div class="setting-row">
-            <span class="setting-text">
-              <span class="setting-label">Recenti</span>
-              <span class="setting-hint">Elementi aperti di recente</span>
-            </span>
-            <button type="button" id="clear-recents-btn" class="btn btn-danger">Svuota recenti</button>
-          </div>
-
-          <div class="setting-row">
-            <span class="setting-text">
-              <span class="setting-label">Valori predefiniti</span>
-              <span class="setting-hint">Recenti, avvio, statistiche e scelta rapida</span>
-            </span>
-            <button type="button" id="reset-pos-btn" class="btn btn-secondary"
-              title="Riporta recenti, avvio con Windows, modalità statistiche e scelta rapida ai valori predefiniti">Ripristina</button>
-          </div>
-
-          <div class="setting-row">
-            <span class="setting-text">
-              <span class="setting-label">Guida</span>
-              <span class="setting-hint">Comandi, filtri e scorciatoie</span>
-            </span>
-            <button type="button" id="help-btn" class="btn btn-secondary" title="Guida e documentazione">Apri la guida</button>
+          <div class="settings-card">
+            <div class="card-title-row">
+              <h2 class="settings-card-title">In RocketLauncher</h2>
+              <button type="button" id="keys-reset-btn" class="btn btn-small"
+                title="Riporta i tasti delle azioni ai valori predefiniti">Ripristina predefiniti</button>
+            </div>
+            <div id="action-list" class="action-list"></div>
           </div>
         </div>
       </div>
-
-      <p class="legal">
-        RocketLauncher è una versione modificata di
-        <a href="https://github.com/YashvardhanG/Velocmd" data-external>Velocmd</a> di Yashvardhan Gupta,
-        distribuita con licenza <a id="license-link" href="#" data-external>GPL-3.0</a> senza alcuna garanzia.
-      </p>
     </section>
 
     <div id="results-container" class="hidden">
@@ -140,14 +196,7 @@
 
     <footer class="footer">
       <span class="brand" aria-hidden="true">
-        <svg class="brand-glyph" viewBox="0 0 1024 1024" fill="currentColor" focusable="false">
-          <g transform="rotate(45 512 512) translate(512 512) scale(1.24) translate(-512 -526)">
-            <path fill-rule="evenodd" d="M512 150C606 222 646 318 646 430V650C646 680 624 702 594 702H430C400 702 378 680 378 650V430C378 318 418 222 512 150ZM512 358A62 62 0 1 0 512 482A62 62 0 1 0 512 358Z" />
-            <path d="M378 520L290 608C278 620 272 636 272 652V742L378 690Z" />
-            <path d="M646 520L734 608C746 620 752 636 752 652V742L646 690Z" />
-            <path class="flame" d="M512 752C556 800 566 846 512 902C458 846 468 800 512 752Z" />
-          </g>
-        </svg>
+        <svg class="brand-glyph" viewBox="0 0 1024 1024" focusable="false"><use href="#rl-logo" /></svg>
         RocketLauncher
       </span>
       <div id="key-hints" class="key-hints" aria-hidden="true"></div>

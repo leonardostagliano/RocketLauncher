@@ -1,6 +1,8 @@
-// Origine degli aggiornamenti, fissata in build: l'unico punto del codice in cui compare il repository GitHub.
+// Origine degli aggiornamenti, fissata in build: l'unico punto del frontend in cui compare il repository GitHub.
 // La usano il controllo aggiornamenti di main.js e scripts/windows-release.mjs (che rifiuta di pubblicare su un
-// repository diverso da questo, altrimenti l'app controllerebbe le release di un altro progetto).
+// repository diverso da questo, altrimenti l'app controllerebbe le release di un altro progetto). Fuori dal frontend
+// lo stesso indirizzo compare nel preset "RocketLauncher su GitHub" di src-tauri/src/main.rs e in bundle.homepage di
+// src-tauri/tauri.conf.json: tests/release-contract.test.mjs controlla che coincidano con REPOSITORY_URL.
 export const UPDATE_REPOSITORY = "leonardostagliano/RocketLauncher";
 export const REPOSITORY_URL = `https://github.com/${UPDATE_REPOSITORY}`;
 export const HELP_URL = `${REPOSITORY_URL}#readme`;
@@ -33,7 +35,7 @@ export function isNewer(latest, current) {
 
 /**
  * La release stabile pubblicata descritta dalla risposta di /releases/latest, o null. L'URL da aprire e' costruito qui
- * dal repository fissato in build, mai preso dalla risposta (html_url): il comando open_file lo passa a `cmd /C start`.
+ * dal repository fissato in build, mai preso dalla risposta (html_url): il comando open_file lo apre nel browser.
  */
 export function latestReleaseFrom(data) {
   if (!data || typeof data !== "object" || data.draft !== false || data.prerelease !== false) return null;

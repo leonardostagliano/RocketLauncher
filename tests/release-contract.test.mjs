@@ -4,6 +4,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { mainBinaryName, productName } from '../scripts/windows-release.mjs'
+import { HELP_URL, REPOSITORY_URL } from '../src/update-source.js'
 
 // Contratto del repository con la pipeline di rilascio (.github/workflows/windows-release.yml): unica fonte della
 // versione, pacchetti NSIS/MSI in italiano, workflow e collegamento dell'app al controllo di rilascio. Controlli sul
@@ -178,9 +179,23 @@ describe('app wiring for releases', () => {
     assert.match(connect, /(^|\s)https:\/\/api\.github\.com(\s|$)/, `connect-src: ${connect}`)
   })
 
+  it('points the Rust preset and the installer homepage at the repository of update-source.js', () => {
+    const main = read('src-tauri/src/main.rs')
+    const links = [...main.matchAll(/https:\/\/github\.com\/[\w.-]+\/RocketLauncher[^"\s]*/g)].map(([link]) => link)
+    assert.ok(links.length > 0, 'the "RocketLauncher su GitHub" preset')
+    for (const link of links) assert.ok(link === REPOSITORY_URL || link.startsWith(`${REPOSITORY_URL}#`), link)
+    assert.ok(links.includes(HELP_URL), 'the preset opens the same page as the in-app help')
+    assert.equal(tauriConfig().bundle.homepage, REPOSITORY_URL)
+  })
+
   it('embeds the frontend files the --smoke check looks for', () => {
-    for (const name of ['index.html', 'main.js', 'update-source.js', 'styles.css']) {
-      assert.ok(existsSync(join(root, 'src', name)), name)
+    const main = read('src-tauri/src/main.rs')
+    const smokeList = /if \[([^\]]*)\]\s*\.iter\(\)\s*\.any\(\|name\| assets\.get/.exec(main)?.[1]
+    assert.ok(smokeList, 'asset list of smoke_exit_code in main.rs')
+    const names = [...smokeList.matchAll(/"([^"]+)"/g)].map((m) => m[1])
+    for (const name of ['index.html', 'main.js', 'update-source.js', 'icons.js', 'shortcuts.js', 'styles.css']) {
+      assert.ok(names.includes(name), `${name} in the --smoke check`)
     }
+    for (const name of names) assert.ok(existsSync(join(root, 'src', name)), name)
   })
 })
