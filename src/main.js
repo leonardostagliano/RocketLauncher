@@ -58,8 +58,83 @@ const PRESET_SHORTCUTS = [
   "Super+/"
 ];
 
-const savedRecents = localStorage.getItem("recentFiles");
-if (savedRecents) state.recentFiles = JSON.parse(savedRecents);
+// Recents are reopened with a single Enter, so only rows that are safe and meaningful
+// to open again are stored. Power confirmations, quit, cancel, filter suggestions,
+// window handles and other transient rows are never remembered.
+const RECENT_LIMIT = 10;
+const RECENT_KINDS = new Set(["app", "file", "folder", "drive"]);
+const RECENT_ROCKET_COMMANDS = new Set([
+  "rocket:help",
+  "rocket:settings",
+  "rocket:refresh",
+  "rocket:show_desktop",
+  "rocket:active_tabs",
+  "rocket:media_play",
+  "rocket:media_next",
+  "rocket:media_prev"
+]);
+const POWER_COMMAND_PATTERN = /\b(shutdown|restart-computer|stop-computer)\b/i;
+
+function isRecentCandidate(path, kind) {
+  if (typeof path !== "string" || path.length === 0 || typeof kind !== "string") return false;
+  const lowerPath = path.toLowerCase();
+
+  if (lowerPath.startsWith("rocket:")) {
+    return kind === "command" && RECENT_ROCKET_COMMANDS.has(lowerPath);
+  }
+  if (lowerPath.startsWith("nox:") || lowerPath.startsWith("hwnd:")) return false;
+
+  if (kind === "command") {
+    const isSystemEntry = lowerPath.startsWith("cmd:") || lowerPath.startsWith("ms-settings:");
+    return isSystemEntry && !POWER_COMMAND_PATTERN.test(path);
+  }
+  if (kind === "terminal_command") return !POWER_COMMAND_PATTERN.test(path);
+  if (kind === "website") return lowerPath.startsWith("http://") || lowerPath.startsWith("https://");
+  return RECENT_KINDS.has(kind);
+}
+
+function loadStoredRecents() {
+  let stored;
+  try {
+    stored = JSON.parse(localStorage.getItem("recentFiles") || "[]");
+  } catch (e) {
+    return [];
+  }
+  if (!Array.isArray(stored)) return [];
+
+  const seenPaths = new Set();
+  const recents = [];
+  for (const entry of stored) {
+    const item = typeof entry === "string" ? { path: entry, kind: "file" } : entry;
+    if (!item || typeof item !== "object") continue;
+    const { path, kind } = item;
+    if (!isRecentCandidate(path, kind) || seenPaths.has(path)) continue;
+    seenPaths.add(path);
+    const name = typeof item.name === "string" && item.name.length > 0 ? item.name : path.split("\\").pop();
+    recents.push({ path, kind, name });
+    if (recents.length >= RECENT_LIMIT) break;
+  }
+  return recents;
+}
+
+function saveRecents() {
+  try {
+    localStorage.setItem("recentFiles", JSON.stringify(state.recentFiles));
+  } catch (e) {
+    console.error("Failed to save recents:", e);
+  }
+}
+
+function rememberRecent(path, kind, name) {
+  if (!isRecentCandidate(path, kind)) return;
+  const newItem = { path, kind, name: name || path.split("\\").pop() };
+  const others = state.recentFiles.filter(p => (typeof p === "string" ? p : p.path) !== path);
+  state.recentFiles = [newItem, ...others].slice(0, RECENT_LIMIT);
+  saveRecents();
+}
+
+state.recentFiles = loadStoredRecents();
+saveRecents();
 
 const savedShowRecents = localStorage.getItem("showRecentsSetting");
 if (savedShowRecents !== null) {
@@ -682,11 +757,7 @@ async function openFile(path, kind, name) {
   const isPrivateMode = state.activeFilters.some(f => f.toLowerCase() === "/p" || f.toLowerCase() === "@p");
 
   if (!isPrivateMode) {
-    const validName = name || path.split('\\').pop();
-    const newItem = { path, kind, name: validName };
-    const filtered = state.recentFiles.filter(p => (typeof p === 'string' ? p : p.path) !== path);
-    state.recentFiles = [newItem, ...filtered].slice(0, 10);
-    localStorage.setItem("recentFiles", JSON.stringify(state.recentFiles));
+    rememberRecent(path, kind, name);
   }
 
   if (path === "rocket:request_shutdown") {
